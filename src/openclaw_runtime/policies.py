@@ -8,6 +8,7 @@ from typing import Any
 
 from .audit import AuditAction, AuditLogger, AuditResult
 from .messaging import InternalMessage
+from .rbac import RBAC, Permission, Role
 from .sandbox import SandboxManager, SandboxPlan
 from .security import DeviceTrustStore
 from .sessions import SessionRecord
@@ -166,6 +167,7 @@ class PolicyEngine:
         trust_store: DeviceTrustStore | None = None,
         sandbox_manager: SandboxManager | None = None,
         audit_logger: AuditLogger | None = None,
+        rbac: RBAC | None = None,
     ) -> None:
         self.channel_policy = channel_policy or ChannelAllowlistPolicy()
         self.approval_policy = approval_policy or ApprovalPolicy()
@@ -174,6 +176,8 @@ class PolicyEngine:
         self.trust_store = trust_store or DeviceTrustStore()
         self.sandbox_manager = sandbox_manager or SandboxManager()
         self.audit_logger = audit_logger
+        # RBAC: role → permission mapping (default-deny)
+        self.rbac = rbac or RBAC()
 
     def _audit(
         self,
@@ -218,22 +222,43 @@ class PolicyEngine:
         device_id: str | None = None,
         device_token: str | None = None,
     ) -> PolicyDecision:
+        # ── Gateway token check (always runs first) ─────────────────────────────
         if not self.trust_store.authenticate_gateway(gateway_token):
             d = deny("gateway", "gateway.connect", device_id or "unknown", "gateway token rejected")
             self._audit(AuditAction.CONNECTION, "device", device_id or "unknown", "", "",
                         device_id or "unknown", None, AuditResult.DENY, d.reason)
             return d
+
         if device_id is None:
-            d = allow("gateway", "gateway.connect", "anonymous", "gateway token accepted")
+            d = allow("gateway", "gateway.connect", "anonymous", "gateway token accepted (anonymous)")
             self._audit(AuditAction.CONNECTION, "device", "anonymous", "", "",
                         "anonymous", None, AuditResult.ALLOW, d.reason)
             return d
+
+        # ── Device trust check ─────────────────────────────────────────────────
         if not device_token or not self.trust_store.verify_device(device_id, device_token):
-            d = deny("trust", "device.connect", device_id, f"device not trusted: {device_id}")
+            # New device trying to connect: check DEVICE_PAIR permission
+            rbac_decision = self.rbac.check(device_id, Permission.DEVICE_PAIR, "device:*")
+            if not rbac_decision.allowed:
+                d = deny("rbac", "device.connect", device_id, rbac_decision.reason)
+                self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
+                            device_id, None, AuditResult.DENY, d.reason)
+                return d
+            # RBAC allows pairing: allow but require device pairing flow
+            d = allow("rbac", "device.connect", device_id, f"device '{device_id}' RBAC-allowed to pair")
+            self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
+                        device_id, None, AuditResult.ALLOW, d.reason)
+            return d
+
+        # Existing trusted device: check DEVICE_PAIR (connecting already-paired device)
+        rbac_decision = self.rbac.check(device_id, Permission.DEVICE_PAIR, "device:*")
+        if not rbac_decision.allowed:
+            d = deny("rbac", "device.connect", device_id, rbac_decision.reason)
             self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
                         device_id, None, AuditResult.DENY, d.reason)
             return d
-        d = allow("trust", "device.connect", device_id, f"device trusted: {device_id}")
+
+        d = allow("rbac", "device.connect", device_id, f"device trusted: {device_id} (RBAC: {rbac_decision.role.value if rbac_decision.role else 'none'})")
         self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
                     device_id, None, AuditResult.ALLOW, d.reason)
         return d
@@ -252,6 +277,27 @@ class PolicyEngine:
         ).raise_if_blocked()
 
     def decide_inbound(self, message: InternalMessage) -> PolicyDecision:
+        # ── RBAC check ────────────────────────────────────────────────────────
+        rbac_decision = self.rbac.check(
+            subject=message.peer_id,
+            permission=Permission.CHANNEL_RECEIVE,
+            resource=f"channel:{message.channel}",
+        )
+        if not rbac_decision.allowed:
+            d = deny("rbac", "channel.receive", message.channel, rbac_decision.reason)
+            self._audit(
+                AuditAction.CHANNEL_RECEIVE,
+                "user",
+                message.peer_id,
+                "",
+                "",
+                message.channel,
+                {"text_len": len(message.text), "group_id": message.group_id},
+                AuditResult.DENY,
+                d.reason,
+            )
+            return d
+
         d = self.channel_policy.decide(message)
         self._audit(
             AuditAction.CHANNEL_RECEIVE,
@@ -275,6 +321,23 @@ class PolicyEngine:
         tool_name: str,
         args: dict[str, Any] | None = None,
     ) -> PolicyDecision:
+        # ── RBAC check first (default-deny) ────────────────────────────────────
+        sandboxed = (
+            self.sandbox_manager is not None
+            and self.sandbox_manager.should_sandbox_tool(tool_name)
+        )
+        rbac_decision = self.rbac.check_tool(
+            subject=session.agent_id,
+            tool_name=tool_name,
+            sandboxed=sandboxed,
+        )
+        if not rbac_decision.allowed:
+            d = deny("rbac", "tool.call", tool_name, rbac_decision.reason)
+            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                        session.session_key, session.agent_id, tool_name, args,
+                        AuditResult.DENY, d.reason)
+            return d
+
         if not self.tool_policy.allowed(tool_name, agent_id=session.agent_id):
             d = deny("tool", "tool.call", tool_name, f"tool denied: {tool_name}")
             self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
@@ -314,6 +377,27 @@ class PolicyEngine:
         return self.decide_tool_call(session, tool_name, args).raise_if_blocked()
 
     def decide_message_send(self, session: SessionRecord, content: str) -> PolicyDecision:
+        # ── RBAC check ────────────────────────────────────────────────────────
+        rbac_decision = self.rbac.check(
+            subject=session.agent_id,
+            permission=Permission.CHANNEL_SEND,
+            resource=f"channel:{session.channel}",
+        )
+        if not rbac_decision.allowed:
+            d = deny("rbac", "message.send", session.channel, rbac_decision.reason)
+            self._audit(
+                AuditAction.MESSAGE_SEND,
+                "agent",
+                session.agent_id,
+                session.session_key,
+                session.agent_id,
+                session.channel,
+                {"content_len": len(content), "group_id": session.group_id},
+                AuditResult.DENY,
+                d.reason,
+            )
+            return d
+
         message_decision = self.message_send_policy.decide(session, content)
         if not message_decision.allowed:
             self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,

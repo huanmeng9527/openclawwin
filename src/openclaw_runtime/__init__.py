@@ -10,6 +10,12 @@ from .approval import (
     FeishuApprovalChannel,
     WebhookApprovalChannel,
 )
+from .rbac import (
+    Permission,
+    RBAC,
+    RBACDecision,
+    Role,
+)
 from .audit import AuditAction, AuditEvent, AuditLogger, AuditResult
 from .gateway import Gateway, GatewayConfig, TLSConfig
 from .messaging import ChannelBridge, InternalMessage
@@ -53,10 +59,14 @@ __all__ = [
     "InternalMessage",
     "MessageSendPolicy",
     "ModelOutput",
+    "Permission",
     "PodmanSandboxRunner",
     "PolicyDecision",
     "PolicyDenied",
     "PolicyEngine",
+    "RBAC",
+    "RBACDecision",
+    "Role",
     "SandboxConfig",
     "SandboxManager",
     "SandboxPlan",

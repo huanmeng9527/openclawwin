@@ -10,6 +10,7 @@ from openclaw_memory import WorkspaceMemory
 
 from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
 from .approval import ApprovalBroker, ApprovalServer
+from .rbac import RBAC, Role
 from .audit import AuditLogger
 from .hooks import HookEngine, PluginContext, PluginManager
 from .messaging import ChannelBridge, DictChannelBridge, InternalMessage
@@ -150,6 +151,8 @@ class GatewayConfig:
     auto_approve: bool = True
     # Approval timeout in seconds (0 = no timeout, defaults to 300s)
     approval_timeout_seconds: float = 300.0
+    # RBAC: initial role assignments (subject_id → role name, e.g. "device-001" → "admin")
+    rbac_assignments: dict[str, str] = field(default_factory=dict)
     # TLS configuration (default: enabled=False for upstream proxy in production)
     tls: TLSConfig = field(default_factory=lambda: TLSConfig(enabled=False))
 
@@ -194,6 +197,15 @@ class Gateway:
         self.sandbox = SandboxManager(config.sandbox)
         self.nodes = NodeRegistry()
         self.trust = DeviceTrustStore(gateway_token=config.gateway_token)
+        # RBAC engine — role → permission mapping (default-deny)
+        self.rbac = RBAC(
+            initial_assignments={
+                subject: Role(role_str)
+                for subject, role_str in config.rbac_assignments.items()
+                if role_str in (r.value for r in Role)
+            }
+        )
+
         # Audit logger — writes structured JSON Lines to .openclaw/audit/audit.log
         self.audit = AuditLogger(self.workspace)
         self.policy = policy_engine or PolicyEngine(
@@ -213,6 +225,7 @@ class Gateway:
             trust_store=self.trust,
             sandbox_manager=self.sandbox,
             audit_logger=self.audit,
+            rbac=self.rbac,
         )
         self.bridges: dict[str, ChannelBridge] = {"dict": DictChannelBridge("dict")}
         self.cron = CronScheduler()
