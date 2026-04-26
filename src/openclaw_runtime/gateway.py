@@ -236,6 +236,7 @@ class Gateway:
         self.approval_broker = ApprovalBroker(
             timeout_seconds=config.approval_timeout_seconds,
             rbac=self.rbac,  # RBAC enforcement on approve/deny actions
+            audit_logger=self.audit_logger,  # Audit logging for approval RBAC decisions
         )
         # Optional: attach an approval server for webhook callbacks (start separately)
         self.approval_server: ApprovalServer | None = None

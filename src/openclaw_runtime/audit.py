@@ -58,15 +58,24 @@ class AuditResult(str, Enum):
 
 @dataclass(frozen=True)
 class AuditEvent:
-    """Single structured audit log entry."""
+    """Single structured audit log entry for security auditing and forensics."""
 
     # ── Identification ────────────────────────────────────────────────────
-    version: str = "1"
+    version: str = "2"  # bumped for new RBAC fields
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Who initiated the action
     subject_type: str = "unknown"  # "device" | "agent" | "system" | "user"
     subject_id: str = "unknown"
+
+    # RBAC role of the subject at time of decision
+    subject_role: str = ""  # "viewer" | "operator" | "admin" | ""
+
+    # What permission was checked
+    permission: str = ""  # "tool.call" | "channel.send" | etc.
+
+    # What resource was targeted
+    resource: str = ""  # "tool:exec" | "channel:feishu" | etc.
 
     # Context
     session_key: str = ""
@@ -80,13 +89,14 @@ class AuditEvent:
     # Argument summary (never full args — redact sensitive values)
     args_summary: dict[str, Any] = field(default_factory=dict)
 
-    # Policy decision
+    # Policy / RBAC decision
     decision: AuditResult = AuditResult.ALLOW
     decision_reason: str = ""
 
     # Approval chain
     approval_required: bool = False
-    approver: str = ""  # "auto" | "device_id" | "webhook" | ""
+    approver: str = ""  # "auto" | "human:name" | "device_id" | ""
+    approval_result: str = ""  # "approved" | "denied" | "timeout" | ""
 
     # Outcome
     success: bool = True
@@ -200,6 +210,9 @@ class AuditLogger:
         action: AuditAction,
         subject_type: str = "unknown",
         subject_id: str = "unknown",
+        subject_role: str = "",
+        permission: str = "",
+        resource: str = "",
         session_key: str = "",
         agent_id: str = "",
         run_id: str = "",
@@ -209,15 +222,19 @@ class AuditLogger:
         decision_reason: str = "",
         approval_required: bool = False,
         approver: str = "",
+        approval_result: str = "",
         success: bool = True,
         error_detail: str = "",
         duration_ms: int = 0,
         **metadata: Any,
     ) -> None:
-        """Convenience helper — construct and write an AuditEvent."""
+        """Construct and write an AuditEvent with full RBAC context."""
         event = AuditEvent(
             subject_type=subject_type,
             subject_id=subject_id,
+            subject_role=subject_role,
+            permission=permission,
+            resource=resource,
             session_key=session_key,
             agent_id=agent_id,
             run_id=run_id,
@@ -228,6 +245,7 @@ class AuditLogger:
             decision_reason=decision_reason,
             approval_required=approval_required,
             approver=approver,
+            approval_result=approval_result,
             success=success,
             error_detail=error_detail,
             duration_ms=duration_ms,

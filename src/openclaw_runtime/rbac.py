@@ -141,7 +141,9 @@ _DEFAULT_ROLE_TABLE: list[tuple[Role, Permission, str]] = [
     (Role.OPERATOR, Permission.POLICY_VIEW,      "policy:*",     "view policies"),
     (Role.OPERATOR, Permission.TOOL_CALL,         "tool:*",       "call any tool"),
     (Role.OPERATOR, Permission.TOOL_REGISTER,     "tool:*",       "register tools"),
-    (Role.OPERATOR, Permission.APPROVAL_ACT,     "approval:*",   "approve/deny pending approvals"),
+    (Role.OPERATOR, Permission.APPROVAL_ACT,     "approval:tool.call",   "approve/deny tool call approvals"),
+    (Role.OPERATOR, Permission.APPROVAL_ACT,     "approval:message.send",  "approve/deny message send approvals"),
+    (Role.OPERATOR, Permission.APPROVAL_ACT,     "approval:channel.receive","approve/deny channel receive approvals"),
     (Role.OPERATOR, Permission.GATEWAY_CONFIG_VIEW, "gateway:*", "view gateway config"),
     (Role.OPERATOR, Permission.EXEC_SANDBOXED,    "exec:*",       "run sandboxed commands"),
 

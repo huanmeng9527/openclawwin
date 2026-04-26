@@ -88,17 +88,9 @@ class ApprovalPolicy:
         if approval_id in self.denied:
             return deny("approval", action, subject, f"approval denied: {approval_id}", approval_id=approval_id)
         if action not in self.required_actions or self.auto_approve or approval_id in self.approved:
-            d = allow("approval", action, subject, "approval not required", approval_id=approval_id)
-            return PolicyDecision(
-                allowed=True,
-                reason=d.reason,
-                layer=d.layer,
-                action=d.action,
-                subject=d.subject,
-                requires_approval=False,
-                approval_id=approval_id,
-                auto_approved=True,
-            )
+            d = allow("approval", action, subject, "approval not required",
+                       approval_id=approval_id, auto_approved=True)
+            return d
         self.pending.setdefault(
             approval_id,
             ApprovalRequest(
@@ -193,18 +185,22 @@ class PolicyEngine:
     def _audit(
         self,
         action: AuditAction,
-        subject_type: str,
-        subject_id: str,
-        session_key: str,
-        agent_id: str,
-        target: str,
-        args: dict[str, Any] | None,
-        decision: AuditResult,
-        reason: str,
+        subject_type: str = "unknown",
+        subject_id: str = "unknown",
+        session_key: str = "",
+        agent_id: str = "",
+        target: str = "",
+        args: dict[str, Any] | None = None,
+        decision: AuditResult = AuditResult.ALLOW,
+        decision_reason: str = "",
         approval_required: bool = False,
         approver: str = "",
         success: bool = True,
         error_detail: str = "",
+        # RBAC fields passed via kwargs (use keyword args for new fields)
+        subject_role: str = "",
+        permission: str = "",
+        resource: str = "",
         **metadata: Any,
     ) -> None:
         if self.audit_logger is None:
@@ -218,11 +214,14 @@ class PolicyEngine:
             target=target,
             args=args,
             decision=decision,
-            decision_reason=reason,
+            decision_reason=decision_reason,
             approval_required=approval_required,
             approver=approver,
             success=success,
             error_detail=error_detail,
+            subject_role=subject_role,
+            permission=permission,
+            resource=resource,
             **metadata,
         )
 
@@ -236,14 +235,19 @@ class PolicyEngine:
         # ── Gateway token check (always runs first) ─────────────────────────────
         if not self.trust_store.authenticate_gateway(gateway_token):
             d = deny("gateway", "gateway.connect", device_id or "unknown", "gateway token rejected")
-            self._audit(AuditAction.CONNECTION, "device", device_id or "unknown", "", "",
-                        device_id or "unknown", None, AuditResult.DENY, d.reason)
+            self._audit(AuditAction.CONNECTION, "device", device_id or "unknown",
+                target=device_id or "unknown", args=None,
+                subject_role=self.rbac.get_role(device_id or "") or "",
+                permission="device.pair", resource="device:*",
+                decision=AuditResult.DENY, decision_reason=d.reason)
             return d
 
         if device_id is None:
             d = allow("gateway", "gateway.connect", "anonymous", "gateway token accepted (anonymous)")
-            self._audit(AuditAction.CONNECTION, "device", "anonymous", "", "",
-                        "anonymous", None, AuditResult.ALLOW, d.reason)
+            self._audit(AuditAction.CONNECTION, "device", "anonymous",
+                target="anonymous", args=None,
+                subject_role="", permission="device.connect", resource="device:anonymous",
+                decision=AuditResult.ALLOW, decision_reason=d.reason)
             return d
 
         # ── Device trust check ─────────────────────────────────────────────────
@@ -252,26 +256,44 @@ class PolicyEngine:
             rbac_decision = self.rbac.check(device_id, Permission.DEVICE_PAIR, "device:*")
             if not rbac_decision.allowed:
                 d = deny("rbac", "device.connect", device_id, rbac_decision.reason)
-                self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
-                            device_id, None, AuditResult.DENY, d.reason)
+                self._audit(
+                    AuditAction.CONNECTION, "device", device_id,
+                    target=device_id, args=None,
+                    subject_role=self.rbac.get_role(device_id) or "",
+                    permission="device.pair", resource="device:*",
+                    decision=AuditResult.DENY, decision_reason=d.reason,
+                )
                 return d
             # RBAC allows pairing: allow but require device pairing flow
             d = allow("rbac", "device.connect", device_id, f"device '{device_id}' RBAC-allowed to pair")
-            self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
-                        device_id, None, AuditResult.ALLOW, d.reason)
+            self._audit(
+                AuditAction.CONNECTION, "device", device_id,
+                target=device_id, args=None,
+                subject_role=self.rbac.get_role(device_id) or "",
+                permission="device.pair", resource="device:*",
+                decision=AuditResult.ALLOW, decision_reason=d.reason,
+            )
             return d
 
         # Existing trusted device: check DEVICE_PAIR (connecting already-paired device)
         rbac_decision = self.rbac.check(device_id, Permission.DEVICE_PAIR, "device:*")
         if not rbac_decision.allowed:
             d = deny("rbac", "device.connect", device_id, rbac_decision.reason)
-            self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
-                        device_id, None, AuditResult.DENY, d.reason)
+            self._audit(
+                AuditAction.CONNECTION, "device", device_id,
+                target=device_id, args=None,
+                subject_role=self.rbac.get_role(device_id) or "",
+                permission="device.pair", resource="device:*",
+                decision=AuditResult.DENY, decision_reason=d.reason,
+            )
             return d
 
         d = allow("rbac", "device.connect", device_id, f"device trusted: {device_id} (RBAC: {rbac_decision.role.value if rbac_decision.role else 'none'})")
-        self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
-                    device_id, None, AuditResult.ALLOW, d.reason)
+        self._audit(AuditAction.CONNECTION, "device", device_id,
+                target=device_id, args=None,
+                subject_role=self.rbac.get_role(device_id) or "",
+                permission="device.pair", resource="device:*",
+                decision=AuditResult.ALLOW, decision_reason=d.reason)
         return d
 
     def enforce_connection(
@@ -297,29 +319,23 @@ class PolicyEngine:
         if not rbac_decision.allowed:
             d = deny("rbac", "channel.receive", message.channel, rbac_decision.reason)
             self._audit(
-                AuditAction.CHANNEL_RECEIVE,
-                "user",
-                message.peer_id,
-                "",
-                "",
-                message.channel,
-                {"text_len": len(message.text), "group_id": message.group_id},
-                AuditResult.DENY,
-                d.reason,
+                AuditAction.CHANNEL_RECEIVE, "user", message.peer_id,
+                target=message.channel, args={"text_len": len(message.text), "group_id": message.group_id},
+                subject_role=self.rbac.get_role(message.peer_id) or "",
+                permission="channel.receive", resource=f"channel:{message.channel}",
+                decision=AuditResult.DENY, decision_reason=d.reason,
             )
             return d
 
         d = self.channel_policy.decide(message)
         self._audit(
-            AuditAction.CHANNEL_RECEIVE,
-            "user",
-            message.peer_id,
-            "",
-            "",
-            message.channel,
-            {"text_len": len(message.text), "group_id": message.group_id},
-            AuditResult.ALLOW if d.allowed else AuditResult.DENY,
-            d.reason,
+            AuditAction.CHANNEL_RECEIVE, "user", message.peer_id,
+            target=message.channel,
+            args={"text_len": len(message.text), "group_id": message.group_id},
+            subject_role=self.rbac.get_role(message.peer_id) or "",
+            permission="channel.receive", resource=f"channel:{message.channel}",
+            decision=AuditResult.ALLOW if d.allowed else AuditResult.DENY,
+            decision_reason=d.reason,
         )
         return d
 
@@ -354,9 +370,14 @@ class PolicyEngine:
             )
             if not rbac_exec.allowed:
                 d = deny("rbac", "exec.raw", tool_name, rbac_exec.reason)
-                self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                            session.session_key, session.agent_id, tool_name, args,
-                            AuditResult.DENY, d.reason)
+                self._audit(
+                    AuditAction.TOOL_CALL, "agent", session.agent_id,
+                    session_key=session.session_key, agent_id=session.agent_id,
+                    target=tool_name, args=args,
+                    subject_role=self.rbac.get_role(session.agent_id) or "",
+                    permission="exec.raw", resource=f"exec:{tool_name}",
+                    decision=AuditResult.DENY, decision_reason=d.reason,
+                )
                 return d
 
         # ── RBAC tool permission check ─────────────────────────────────────────
@@ -371,16 +392,26 @@ class PolicyEngine:
             )
             if not rbac_decision.allowed:
                 d = deny("rbac", "tool.call", tool_name, rbac_decision.reason)
-                self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                            session.session_key, session.agent_id, tool_name, args,
-                            AuditResult.DENY, d.reason)
+                self._audit(
+                    AuditAction.TOOL_CALL, "agent", session.agent_id,
+                    session_key=session.session_key, agent_id=session.agent_id,
+                    target=tool_name, args=args,
+                    subject_role=self.rbac.get_role(session.agent_id) or "",
+                    permission="exec.raw", resource=f"exec:{tool_name}",
+                    decision=AuditResult.DENY, decision_reason=d.reason,
+                )
                 return d
 
         if not self.tool_policy.allowed(tool_name, agent_id=session.agent_id):
             d = deny("tool", "tool.call", tool_name, f"tool denied: {tool_name}")
-            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                        session.session_key, session.agent_id, tool_name, args,
-                        AuditResult.DENY, d.reason)
+            self._audit(
+                        AuditAction.TOOL_CALL, "agent", session.agent_id,
+                        session_key=session.session_key, agent_id=session.agent_id,
+                        target=tool_name, args=args,
+                        subject_role=self.rbac.get_role(session.agent_id) or "",
+                        permission="tool.call", resource=f"tool:{tool_name}",
+                        decision=AuditResult.DENY, decision_reason=d.reason,
+                    )
             return d
         approval = self.approval_policy.decide(
             "tool.call",
@@ -392,18 +423,28 @@ class PolicyEngine:
             },
         )
         if not approval.allowed:
-            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                        session.session_key, session.agent_id, tool_name, args,
-                        AuditResult.REQUIRE_APPROVAL, approval.reason,
+            self._audit(
+                        AuditAction.TOOL_CALL, "agent", session.agent_id,
+                        session_key=session.session_key, agent_id=session.agent_id,
+                        target=tool_name, args=args,
+                        subject_role=self.rbac.get_role(session.agent_id) or "",
+                        permission="tool.call", resource=f"tool:{tool_name}",
+                        decision=AuditResult.REQUIRE_APPROVAL,
+                        decision_reason=approval.reason,
                         approval_required=True,
-                        approval_id=approval.approval_id)
+                        approval_id=approval.approval_id,
+                    )
             return approval
-        self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                    session.session_key, session.agent_id, tool_name, args,
-                    AuditResult.ALLOW if approval.auto_approved else AuditResult.APPROVED,
-                    approval.reason,
-                    approval_required=False,
-                    approver="auto" if approval.auto_approved else "")
+        self._audit(
+                    AuditAction.TOOL_CALL, "agent", session.agent_id,
+                    session_key=session.session_key, agent_id=session.agent_id,
+                    target=tool_name, args=args,
+                    subject_role=self.rbac.get_role(session.agent_id) or "",
+                    permission="tool.call", resource=f"tool:{tool_name}",
+                    decision=AuditResult.ALLOW if approval.auto_approved else AuditResult.APPROVED,
+                    decision_reason=approval.reason,
+                    approval_required=False, approver="auto" if approval.auto_approved else "",
+                )
         return allow("tool", "tool.call", tool_name, f"tool allowed: {tool_name}", approval_id=approval.approval_id)
 
     def enforce_tool_call(
@@ -424,24 +465,27 @@ class PolicyEngine:
         if not rbac_decision.allowed:
             d = deny("rbac", "message.send", session.channel, rbac_decision.reason)
             self._audit(
-                AuditAction.MESSAGE_SEND,
-                "agent",
-                session.agent_id,
-                session.session_key,
-                session.agent_id,
-                session.channel,
-                {"content_len": len(content), "group_id": session.group_id},
-                AuditResult.DENY,
-                d.reason,
+                AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                session_key=session.session_key, agent_id=session.agent_id,
+                target=session.channel,
+                args={"content_len": len(content), "group_id": session.group_id},
+                subject_role=self.rbac.get_role(session.agent_id) or "",
+                permission="message.send", resource=f"channel:{session.channel}",
+                decision=AuditResult.DENY, decision_reason=d.reason,
             )
             return d
 
         message_decision = self.message_send_policy.decide(session, content)
         if not message_decision.allowed:
-            self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
-                        session.session_key, session.agent_id, session.channel,
-                        {"content_len": len(content), "group_id": session.group_id},
-                        AuditResult.DENY, message_decision.reason)
+            self._audit(
+                AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                session_key=session.session_key, agent_id=session.agent_id,
+                target=session.channel,
+                args={"content_len": len(content), "group_id": session.group_id},
+                subject_role=self.rbac.get_role(session.agent_id) or "",
+                permission="message.send", resource=f"channel:{session.channel}",
+                decision=AuditResult.DENY, decision_reason=message_decision.reason,
+            )
             return message_decision
         approval = self.approval_policy.decide(
             "message.send",
@@ -454,17 +498,27 @@ class PolicyEngine:
             },
         )
         if not approval.allowed:
-            self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
-                        session.session_key, session.agent_id, session.channel,
-                        {"content_len": len(content), "group_id": session.group_id},
-                        AuditResult.REQUIRE_APPROVAL, approval.reason,
-                        approval_required=True, approval_id=approval.approval_id)
+            self._audit(
+                AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                session_key=session.session_key, agent_id=session.agent_id,
+                target=session.channel,
+                args={"content_len": len(content), "group_id": session.group_id},
+                subject_role=self.rbac.get_role(session.agent_id) or "",
+                permission="message.send", resource=f"channel:{session.channel}",
+                decision=AuditResult.REQUIRE_APPROVAL, decision_reason=approval.reason,
+                approval_required=True, approval_id=approval.approval_id,
+            )
             return approval
-        self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
-                    session.session_key, session.agent_id, session.channel,
-                    {"content_len": len(content), "group_id": session.group_id},
-                    AuditResult.ALLOW, approval.reason,
-                    approval_required=False, approver="auto" if approval.auto_approve else "")
+        self._audit(
+            AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+            session_key=session.session_key, agent_id=session.agent_id,
+            target=session.channel,
+            args={"content_len": len(content), "group_id": session.group_id},
+            subject_role=self.rbac.get_role(session.agent_id) or "",
+            permission="message.send", resource=f"channel:{session.channel}",
+            decision=AuditResult.ALLOW, decision_reason=approval.reason,
+            approval_required=False, approver="auto" if approval.auto_approved else "",
+        )
         return allow(
             "message",
             "message.send",
@@ -496,17 +550,25 @@ class PolicyEngine:
             self._audit(
                 AuditAction.ERROR,
                 "agent" if subject.startswith("agent") else "device",
-                subject, "", "", target_policy, {},
-                AuditResult.DENY, d.reason,
+                subject,
+                target=target_policy, args={},
+                subject_role=self.rbac.get_role(subject) or "",
+                permission="policy.change", resource=f"policy:{target_policy}",
+                decision=AuditResult.DENY, decision_reason=d.reason,
                 metadata={"action": "policy.change"},
             )
             return d
-        d = allow("rbac", "policy.change", target_policy, f"admin can change policy '{target_policy}'")
+        d = allow("rbac", "policy.change", target_policy,
+                       reason=f"admin can change policy '{target_policy}'",
+                       auto_approved=True)
         self._audit(
             AuditAction.ERROR,
             "agent" if subject.startswith("agent") else "device",
-            subject, "", "", target_policy, {},
-            AuditResult.ALLOW, d.reason,
+            subject,
+            target=target_policy, args={},
+            subject_role=self.rbac.get_role(subject) or "",
+            permission="policy.change", resource=f"policy:{target_policy}",
+            decision=AuditResult.ALLOW, decision_reason=d.reason,
             metadata={"action": "policy.change"},
         )
         return d
@@ -515,10 +577,12 @@ class PolicyEngine:
         plan = self.sandbox_manager.plan_for(session)
         self._audit(
             AuditAction.SANDBOX_PLAN, "agent", session.agent_id,
-            session.session_key, session.agent_id, "sandbox",
-            {"enabled": plan.enabled, "scope": plan.scope_key},
-            AuditResult.ALLOW if plan.enabled else AuditResult.DENY,
-            f"sandbox plan: enabled={plan.enabled}, scope={plan.scope_key}",
+            session_key=session.session_key, agent_id=session.agent_id,
+            target="sandbox", args={"enabled": plan.enabled, "scope": plan.scope_key},
+            subject_role=self.rbac.get_role(session.agent_id) or "",
+            permission="sandbox.use", resource=f"sandbox:{plan.scope_key}",
+            decision=AuditResult.ALLOW if plan.enabled else AuditResult.DENY,
+            decision_reason=f"sandbox plan: enabled={plan.enabled}, scope={plan.scope_key}",
         )
         return plan
 
@@ -530,6 +594,7 @@ def allow(
     reason: str,
     *,
     approval_id: str | None = None,
+    auto_approved: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> PolicyDecision:
     return PolicyDecision(
@@ -539,6 +604,7 @@ def allow(
         action=action,
         subject=subject,
         approval_id=approval_id,
+        auto_approved=auto_approved,
         metadata=metadata or {},
     )
 
@@ -550,6 +616,7 @@ def deny(
     reason: str,
     *,
     approval_id: str | None = None,
+    auto_approved: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> PolicyDecision:
     return PolicyDecision(

@@ -119,6 +119,7 @@ class ApprovalBroker:
         timeout_seconds: float = 300.0,  # 5 minutes default
         poll_interval: float = 1.0,
         rbac: Any = None,  # RBAC instance — checked on resolve()
+        audit_logger: Any = None,  # AuditLogger for approval RBAC decisions
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.poll_interval = poll_interval
@@ -126,6 +127,7 @@ class ApprovalBroker:
         self._lock = threading.RLock()
         self._channels: list[ApprovalChannel] = []
         self._rbac = rbac
+        self._audit_logger = audit_logger
 
     # ── Channel registration ─────────────────────────────────────────────────
 
@@ -162,47 +164,76 @@ class ApprovalBroker:
     def resolve(self, approval_id: str, *, approved: bool, resolved_by: str = "", reason: str = "") -> bool:
         """Resolve a pending approval. Returns True if found and resolved.
 
-        Requires APPROVAL_ACT permission if rbac is configured.
+        RBAC enforcement: approver must have APPROVAL_ACT for the specific
+        action type being approved (approval:tool.call, approval:message.send, etc.).
         """
-        # ── RBAC enforcement: only operator/admin can approve/deny ──────────
+        # Step 1: read record (outside lock — re-checked inside lock before write)
+        record = self._records.get(approval_id)
+        if record is None:
+            logger.warning("approval resolve: not found id=%s", approval_id)
+            return False
+        action_type = record.action
+
+        # Step 2: RBAC enforcement (scope = approval:<action_type>)
         if self._rbac is not None:
             from .rbac import Permission
+            scope_resource = f"approval:{action_type}"
             decision = self._rbac.check(
                 subject=resolved_by or "anonymous",
                 permission=Permission.APPROVAL_ACT,
-                resource=f"approval:{approval_id}",
+                resource=scope_resource,
             )
             if not decision.allowed:
                 logger.warning(
-                    "approval resolve BLOCKED by RBAC: subject=%s reason=%s",
-                    resolved_by or "anonymous", decision.reason,
+                    "approval resolve BLOCKED by RBAC: subject=%s cannot approve action=%s reason=%s",
+                    resolved_by or "anonymous", action_type, decision.reason,
+                )
+                self._audit(
+                    action="approval.resolve",
+                    subject=resolved_by or "anonymous",
+                    subject_role=getattr(self._rbac, 'get_role', lambda s: '')(resolved_by or "anonymous") or "",
+                    permission="approval.act",
+                    resource=f"approval:{action_type}",
+                    decision="deny",
+                    decision_reason=decision.reason,
+                    approval_id=approval_id,
+                    metadata={"record_action": action_type},
                 )
                 return False
 
+        # Step 3: RBAC passed — audit the approval decision
+        self._audit(
+            action="approval.resolve",
+            subject=resolved_by or "anonymous",
+            subject_role=getattr(self._rbac, 'get_role', lambda s: '')(resolved_by or "anonymous") or "",
+            permission="approval.act",
+            resource=f"approval:{action_type}",
+            decision="approved" if approved else "denied",
+            decision_reason=reason or ("approved by reviewer" if approved else "denied by reviewer"),
+            approval_id=approval_id,
+            metadata={"record_action": action_type},
+        )
+
+        # Step 4: update record (locked to prevent race conditions)
         with self._lock:
             record = self._records.get(approval_id)
-            if record is None:
-                logger.warning("approval resolve: not found id=%s", approval_id)
-                return False
-            if record.is_resolved():
-                logger.warning("approval resolve: already resolved id=%s status=%s", approval_id, record.status)
+            if record is None or record.is_resolved():
                 return False
             record.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
             record.resolved_at = datetime.now(timezone.utc).isoformat()
             record.resolved_by = resolved_by or ("human:operator" if approved else "human:operator")
             record.resolved_reason = reason
+
         logger.info(
             "approval resolved: id=%s status=%s by=%s",
             approval_id, record.status.value, record.resolved_by,
         )
-        # Notify channels of resolution
         for ch in self._channels:
             try:
                 ch.send_resolution(record, approved=approved)
             except Exception as exc:
                 logger.warning("channel resolution notification failed: %s", exc)
         return True
-
     def get(self, approval_id: str) -> ApprovalRecord | None:
         with self._lock:
             return self._records.get(approval_id)
