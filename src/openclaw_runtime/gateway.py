@@ -226,9 +226,11 @@ class Gateway:
             tool_registry=self.tools,
             hooks=self.hooks,
             policy_engine=self.policy,
+            sandbox_manager=self.sandbox,
         )
         if runtime is not None:
             self.runtime.policy_engine = self.policy
+            self.runtime.sandbox_manager = self.sandbox
 
         # Build SSL context if serving TLS directly
         self._ssl_context: ssl.SSLContext | None = None

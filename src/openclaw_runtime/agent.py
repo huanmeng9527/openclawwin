@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
 from .hooks import HookEngine
 from .policies import PolicyEngine
 from .prompt import PromptAssembler
+from .sandbox import SandboxManager, SandboxRunner, SandboxResult
 from .sessions import SessionRecord
 from .tools import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 NO_REPLY = "NO_REPLY"
@@ -57,6 +63,7 @@ class AgentRuntime:
         tool_registry: ToolRegistry,
         hooks: HookEngine | None = None,
         policy_engine: PolicyEngine | None = None,
+        sandbox_manager: SandboxManager | None = None,
         timeout_seconds: int = 600,
     ) -> None:
         self.model = model
@@ -64,6 +71,7 @@ class AgentRuntime:
         self.tool_registry = tool_registry
         self.hooks = hooks or HookEngine()
         self.policy_engine = policy_engine
+        self.sandbox_manager = sandbox_manager
         self.timeout_seconds = timeout_seconds
 
     def run(self, session: SessionRecord, user_text: str, *, heartbeat: bool = False) -> AgentRunResult:
@@ -92,14 +100,48 @@ class AgentRuntime:
 
             events.append({"event": "tool:start", "tool": tool_call.name})
             try:
-                result = self.tool_registry.call(tool_call.name, tool_call.args, agent_id=session.agent_id)
-                tool_results.append({"tool": tool_call.name, "result": result})
-                events.append({"event": "tool:end", "tool": tool_call.name, "result": result})
-                self.hooks.emit("after_tool_call", {"runId": run_id, "tool": tool_call.name, "result": result})
+                # ── Sandbox dispatch ─────────────────────────────────────────
+                # Check if this tool should run inside a container
+                sandboxed = (
+                    self.sandbox_manager is not None
+                    and self.sandbox_manager.should_sandbox_tool(tool_call.name)
+                )
+                runner = (
+                    self.sandbox_manager.get_runner()
+                    if sandboxed and self.sandbox_manager is not None
+                    else None
+                )
+
+                if runner is not None:
+                    # High-risk tool: run inside Docker/Podman container
+                    workspace = self.prompt_assembler.workspace
+                    events.append({"event": "tool:sandboxed", "tool": tool_call.name, "runner": type(runner).__name__})
+                    sb_result = runner.run(
+                        self._tool_to_argv(tool_call.name, tool_call.args),
+                        workspace_path=workspace,
+                        env={},
+                        timeout_seconds=float(self.timeout_seconds),
+                    )
+                    result = {
+                        "sandboxed": True,
+                        "ok": sb_result.ok,
+                        "stdout": sb_result.stdout,
+                        "stderr": sb_result.stderr,
+                        "exit_code": sb_result.exit_code,
+                        "duration_ms": sb_result.duration_ms,
+                    }
+                    tool_results.append({"tool": tool_call.name, "result": result})
+                    events.append({"event": "tool:end", "tool": tool_call.name, "result": result})
+                    self.hooks.emit("after_tool_call", {"runId": run_id, "tool": tool_call.name, "result": result})
+                else:
+                    # Normal (low-risk) tool: run directly on host
+                    result = self.tool_registry.call(tool_call.name, tool_call.args, agent_id=session.agent_id)
+                    tool_results.append({"tool": tool_call.name, "result": result})
+                    events.append({"event": "tool:end", "tool": tool_call.name, "result": result})
+                    self.hooks.emit("after_tool_call", {"runId": run_id, "tool": tool_call.name, "result": result})
+
             except Exception as exc:
-                # Log validation / runtime errors; do NOT expose internal details to model
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "tool '%s' call failed: %s",
                     tool_call.name,
                     exc,
@@ -122,6 +164,36 @@ class AgentRuntime:
         )
         self.hooks.emit("agent_end", {"runId": run_id, "result": result})
         return result
+
+    @staticmethod
+    def _tool_to_argv(tool_name: str, args: dict[str, Any]) -> list[str]:
+        """Convert a tool call to an argv list for shell execution in container.
+
+        This is a best-effort conversion for sandboxed tools that need to
+        run shell commands.  Tool implementors should provide explicit argv
+        if possible; this generic fallback encodes args as JSON.
+        """
+        import shlex
+
+        if tool_name == "exec":
+            # args: { "command": "ls -la" }
+            cmd = args.get("command", "")
+            return ["sh", "-c", cmd]
+        if tool_name == "shell" or tool_name == "bash":
+            cmd = args.get("cmd", args.get("command", ""))
+            return ["sh", "-c", cmd]
+        if tool_name == "run_code" or tool_name == "python_eval":
+            code = args.get("code", args.get("script", ""))
+            return ["python3", "-c", code]
+        if tool_name == "subprocess":
+            argv = args.get("argv", [])
+            if argv:
+                return argv
+            cmd = args.get("command", "")
+            return ["sh", "-c", cmd]
+        # Generic fallback: encode as JSON and eval
+        encoded = json.dumps(args, ensure_ascii=False)
+        return ["python3", "-c", f"import json,sys; print(json.loads(sys.stdin.read()))", "--json", encoded]
 
 
 def filter_no_reply(text: str) -> str:

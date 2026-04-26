@@ -2,7 +2,7 @@
 
 from .agent import AgentRuntime, EchoModelProvider, ModelOutput
 from .audit import AuditAction, AuditEvent, AuditLogger, AuditResult
-from .gateway import Gateway, GatewayConfig
+from .gateway import Gateway, GatewayConfig, TLSConfig
 from .messaging import ChannelBridge, InternalMessage
 from .policies import (
     ApprovalPolicy,
@@ -13,6 +13,15 @@ from .policies import (
     PolicyDenied,
     PolicyEngine,
 )
+from .sandbox import (
+    DockerSandboxRunner,
+    PodmanSandboxRunner,
+    SandboxConfig,
+    SandboxManager,
+    SandboxPlan,
+    SandboxResult,
+    SandboxRunner,
+)
 from .sessions import SessionManager, SessionRecord
 
 __all__ = [
@@ -22,18 +31,23 @@ __all__ = [
     "AuditLogger",
     "AuditResult",
     "ChannelBridge",
+    "DockerSandboxRunner",
     "EchoModelProvider",
     "Gateway",
     "GatewayConfig",
     "InternalMessage",
-    "ApprovalPolicy",
-    "ApprovalRequired",
-    "ChannelAllowlistPolicy",
     "MessageSendPolicy",
     "ModelOutput",
+    "PodmanSandboxRunner",
     "PolicyDecision",
     "PolicyDenied",
     "PolicyEngine",
+    "SandboxConfig",
+    "SandboxManager",
+    "SandboxPlan",
+    "SandboxResult",
+    "SandboxRunner",
     "SessionManager",
     "SessionRecord",
+    "TLSConfig",
 ]
