@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Reference OpenClaw runtime architecture with Gateway, Agent Runtime, and four-layer memory."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "jsonschema>=4.17",
+]
 authors = [{ name = "OpenClaw Memory Contributors" }]
 license = { text = "MIT" }
 classifiers = [

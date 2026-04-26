@@ -86,11 +86,27 @@ class AgentRuntime:
                         "reason": decision.reason,
                     }
                 )
+                if not decision.allowed:
+                    events.append({"event": "tool:rejected", "tool": tool_call.name, "reason": decision.reason})
+                    continue
+
             events.append({"event": "tool:start", "tool": tool_call.name})
-            result = self.tool_registry.call(tool_call.name, tool_call.args, agent_id=session.agent_id)
-            tool_results.append({"tool": tool_call.name, "result": result})
-            events.append({"event": "tool:end", "tool": tool_call.name, "result": result})
-            self.hooks.emit("after_tool_call", {"runId": run_id, "tool": tool_call.name, "result": result})
+            try:
+                result = self.tool_registry.call(tool_call.name, tool_call.args, agent_id=session.agent_id)
+                tool_results.append({"tool": tool_call.name, "result": result})
+                events.append({"event": "tool:end", "tool": tool_call.name, "result": result})
+                self.hooks.emit("after_tool_call", {"runId": run_id, "tool": tool_call.name, "result": result})
+            except Exception as exc:
+                # Log validation / runtime errors; do NOT expose internal details to model
+                import logging
+                logging.getLogger(__name__).warning(
+                    "tool '%s' call failed: %s",
+                    tool_call.name,
+                    exc,
+                    exc_info=True,
+                )
+                tool_results.append({"tool": tool_call.name, "error": str(exc)})
+                events.append({"event": "tool:error", "tool": tool_call.name, "error": type(exc).__name__})
         output = filter_no_reply(model_output.text)
         no_reply = model_output.text.strip() == NO_REPLY or output.strip() == ""
         if tool_results and output:
