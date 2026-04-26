@@ -1,6 +1,15 @@
 """Reference OpenClaw runtime architecture."""
 
 from .agent import AgentRuntime, EchoModelProvider, ModelOutput
+from .approval import (
+    ApprovalBroker,
+    ApprovalChannel,
+    ApprovalRecord,
+    ApprovalServer,
+    ApprovalStatus,
+    FeishuApprovalChannel,
+    WebhookApprovalChannel,
+)
 from .audit import AuditAction, AuditEvent, AuditLogger, AuditResult
 from .gateway import Gateway, GatewayConfig, TLSConfig
 from .messaging import ChannelBridge, InternalMessage
@@ -26,6 +35,11 @@ from .sessions import SessionManager, SessionRecord
 
 __all__ = [
     "AgentRuntime",
+    "ApprovalBroker",
+    "ApprovalChannel",
+    "ApprovalRecord",
+    "ApprovalServer",
+    "ApprovalStatus",
     "AuditAction",
     "AuditEvent",
     "AuditLogger",
@@ -33,6 +47,7 @@ __all__ = [
     "ChannelBridge",
     "DockerSandboxRunner",
     "EchoModelProvider",
+    "FeishuApprovalChannel",
     "Gateway",
     "GatewayConfig",
     "InternalMessage",
@@ -50,4 +65,5 @@ __all__ = [
     "SessionManager",
     "SessionRecord",
     "TLSConfig",
+    "WebhookApprovalChannel",
 ]

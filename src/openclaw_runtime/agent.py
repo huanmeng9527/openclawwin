@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from .hooks import HookEngine
-from .policies import PolicyEngine
+from .policies import PolicyDecision, PolicyEngine
 from .prompt import PromptAssembler
 from .sandbox import SandboxManager, SandboxRunner, SandboxResult
 from .sessions import SessionRecord
@@ -64,6 +64,7 @@ class AgentRuntime:
         hooks: HookEngine | None = None,
         policy_engine: PolicyEngine | None = None,
         sandbox_manager: SandboxManager | None = None,
+        approval_broker: Any = None,  # ApprovalBroker — see approval.py
         timeout_seconds: int = 600,
     ) -> None:
         self.model = model
@@ -72,6 +73,7 @@ class AgentRuntime:
         self.hooks = hooks or HookEngine()
         self.policy_engine = policy_engine
         self.sandbox_manager = sandbox_manager
+        self.approval_broker = approval_broker  # set by Gateway
         self.timeout_seconds = timeout_seconds
 
     def run(self, session: SessionRecord, user_text: str, *, heartbeat: bool = False) -> AgentRunResult:
@@ -84,19 +86,56 @@ class AgentRuntime:
         tool_results = []
         for tool_call in model_output.tool_calls:
             self.hooks.emit("before_tool_call", {"runId": run_id, "tool": tool_call.name, "args": tool_call.args})
+
+            # ── Policy decision (non-blocking) ────────────────────────────────
+            decision: PolicyDecision | None = None
             if self.policy_engine is not None:
-                decision = self.policy_engine.enforce_tool_call(session, tool_call.name, tool_call.args)
+                decision = self.policy_engine.decide_tool_call(session, tool_call.name, tool_call.args)
                 events.append(
                     {
                         "event": "policy:tool",
                         "tool": tool_call.name,
                         "allowed": decision.allowed,
                         "reason": decision.reason,
+                        "requires_approval": decision.requires_approval,
                     }
                 )
+
                 if not decision.allowed:
                     events.append({"event": "tool:rejected", "tool": tool_call.name, "reason": decision.reason})
                     continue
+
+                # ── Human-in-the-loop approval ─────────────────────────────────
+                # If requires_approval and we have a broker, submit and wait
+                if decision.requires_approval and self.approval_broker is not None:
+                    approval_id = decision.approval_id or ""
+                    # Submit + notify + wait (blocks until human approves/denies/times out)
+                    try:
+                        record = self.approval_broker.request_and_wait(
+                            action="tool.call",
+                            subject=tool_call.name,
+                            context={
+                                "session_key": session.session_key,
+                                "agent_id": session.agent_id,
+                                "args": tool_call.args or {},
+                            },
+                        )
+                        events.append({
+                            "event": "tool:approval_resolved",
+                            "tool": tool_call.name,
+                            "approval_id": approval_id,
+                            "status": record.status.value,
+                            "resolved_by": record.resolved_by,
+                        })
+                        if record.status.value != "approved":
+                            events.append({"event": "tool:rejected", "tool": tool_call.name,
+                                          "reason": f"approval {record.status.value}: {record.resolved_reason}"})
+                            continue
+                    except Exception as exc:
+                        logger.error("approval broker error: %s", exc)
+                        events.append({"event": "tool:rejected", "tool": tool_call.name,
+                                      "reason": f"approval broker error: {exc}"})
+                        continue
 
             events.append({"event": "tool:start", "tool": tool_call.name})
             try:

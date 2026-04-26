@@ -9,6 +9,7 @@ from typing import Any
 from openclaw_memory import WorkspaceMemory
 
 from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
+from .approval import ApprovalBroker, ApprovalServer
 from .audit import AuditLogger
 from .hooks import HookEngine, PluginContext, PluginManager
 from .messaging import ChannelBridge, DictChannelBridge, InternalMessage
@@ -147,6 +148,8 @@ class GatewayConfig:
     outbound_denied_channels: tuple[str, ...] = ()
     require_approval_for: tuple[str, ...] = ()
     auto_approve: bool = True
+    # Approval timeout in seconds (0 = no timeout, defaults to 300s)
+    approval_timeout_seconds: float = 300.0
     # TLS configuration (default: enabled=False for upstream proxy in production)
     tls: TLSConfig = field(default_factory=lambda: TLSConfig(enabled=False))
 
@@ -215,6 +218,12 @@ class Gateway:
         self.cron = CronScheduler()
         self.heartbeat = HeartbeatSystem()
         self.plugins = PluginManager(PluginContext(hooks=self.hooks, services={"gateway": self}))
+
+        # ── Human-in-the-loop approval ──────────────────────────────────────
+        self.approval_broker = ApprovalBroker(timeout_seconds=config.approval_timeout_seconds)
+        # Optional: attach an approval server for webhook callbacks (start separately)
+        self.approval_server: ApprovalServer | None = None
+
         self.runtime = runtime or AgentRuntime(
             model=EchoModelProvider(),
             prompt_assembler=PromptAssembler(
@@ -227,12 +236,69 @@ class Gateway:
             hooks=self.hooks,
             policy_engine=self.policy,
             sandbox_manager=self.sandbox,
+            approval_broker=self.approval_broker,
         )
         if runtime is not None:
             self.runtime.policy_engine = self.policy
             self.runtime.sandbox_manager = self.sandbox
+            self.runtime.approval_broker = self.approval_broker
 
-        # Build SSL context if serving TLS directly
+        # ── Approval server for webhook callbacks ────────────────────────────
+        # Subclass or call this after gateway creation:
+        #   gateway.start_approval_server(host="127.0.0.1", port=8081)
+
+    def configure_feishu_approval(
+        self,
+        bot_token: str,
+        chat_id: str,
+        approval_server_base: str = "http://127.0.0.1:8081",
+    ) -> None:
+        """Register a Feishu interactive card channel for human approvals.
+
+        Args:
+            bot_token: Feishu bot token (with im:message:send scope)
+            chat_id:   Feishu chat_id or open_id to receive approval cards
+            approval_server_base: Base URL of the approval webhook server
+        """
+        from .approval import FeishuApprovalChannel
+        channel = FeishuApprovalChannel(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            approval_server_base=approval_server_base,
+        )
+        self.approval_broker.register_channel(channel)
+
+    def configure_webhook_approval(
+        self,
+        webhook_url: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """Register a generic webhook channel for human approvals.
+
+        The webhook receiver POSTs an approval request payload to this URL
+        and the human approves via the included approve/deny URLs.
+        """
+        from .approval import WebhookApprovalChannel
+        channel = WebhookApprovalChannel(webhook_url=webhook_url, headers=headers)
+        self.approval_broker.register_channel(channel)
+
+    def start_approval_server(self, host: str = "127.0.0.1", port: int = 8081) -> None:
+        """Start a background thread serving approval resolution callbacks.
+
+        Endpoints:
+            GET /approval/{id}/approve → approve
+            GET /approval/{id}/deny    → deny
+
+        Call this once after gateway creation:
+            gateway.start_approval_server()  # runs in background thread
+        """
+        from .approval import ApprovalServer
+        self.approval_server = ApprovalServer(broker=self.approval_broker, host=host, port=port)
+        import threading
+        t = threading.Thread(target=self.approval_server.serve, daemon=True, name="approval-server")
+        t.start()
+
+    # Build SSL context if serving TLS directly
         self._ssl_context: ssl.SSLContext | None = None
         if self.tls.enabled:
             self._ssl_context = self.tls.build_ssl_context()
