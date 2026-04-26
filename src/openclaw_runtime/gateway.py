@@ -11,7 +11,7 @@ from openclaw_memory import WorkspaceMemory
 from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
 from .approval import ApprovalBroker, ApprovalServer
 from .rbac import RBAC, Role
-from .audit import AuditLogger
+from .audit import AuditLogger, AuditResult
 from .hooks import HookEngine, PluginContext, PluginManager
 from .messaging import ChannelBridge, DictChannelBridge, InternalMessage
 from .nodes import NodeRegistry
@@ -200,9 +200,9 @@ class Gateway:
         # RBAC engine — role → permission mapping (default-deny)
         self.rbac = RBAC(
             initial_assignments={
-                subject: Role(role_str)
+                subject: _str_to_role(role_str)
                 for subject, role_str in config.rbac_assignments.items()
-                if role_str in (r.value for r in Role)
+                if _str_to_role(role_str) is not None
             }
         )
 
@@ -233,7 +233,10 @@ class Gateway:
         self.plugins = PluginManager(PluginContext(hooks=self.hooks, services={"gateway": self}))
 
         # ── Human-in-the-loop approval ──────────────────────────────────────
-        self.approval_broker = ApprovalBroker(timeout_seconds=config.approval_timeout_seconds)
+        self.approval_broker = ApprovalBroker(
+            timeout_seconds=config.approval_timeout_seconds,
+            rbac=self.rbac,  # RBAC enforcement on approve/deny actions
+        )
         # Optional: attach an approval server for webhook callbacks (start separately)
         self.approval_server: ApprovalServer | None = None
 
@@ -310,6 +313,84 @@ class Gateway:
         import threading
         t = threading.Thread(target=self.approval_server.serve, daemon=True, name="approval-server")
         t.start()
+
+    def apply_policy_change(
+        self,
+        subject: str,
+        target_policy: str,
+        new_config: dict[str, Any],
+    ) -> bool:
+        """Apply a runtime policy change after RBAC authorization check.
+
+        Returns True if the change was applied, False if denied.
+
+        This is the ONLY method that should modify policies at runtime.
+        All policy changes must:
+          1. Pass RBAC POLICY_CHANGE permission check
+          2. Be recorded in the audit log
+          3. Not break the currently running agent loop
+        """
+        decision = self.policy.decide_policy_change(subject, target_policy)
+        if not decision.allowed:
+            self.audit.log_event(
+                action="policy.change",
+                subject_type="agent" if subject.startswith("agent") else "device",
+                subject_id=subject,
+                target=target_policy,
+                decision=AuditResult.DENY,
+                decision_reason=decision.reason,
+                success=False,
+                error_detail=f"RBAC denied: {decision.reason}",
+                metadata={"new_config_keys": list(new_config.keys())},
+            )
+            return False
+
+        # Apply changes to the correct policy
+        if target_policy == "tool_policy":
+            # new_config: {"global_allow": [...], "global_deny": [...], "default_allow": bool}
+            if "default_allow" in new_config:
+                self.policy.tool_policy.default_allow = new_config["default_allow"]
+            if "global_deny" in new_config:
+                self.policy.tool_policy.global_deny = set(new_config["global_deny"])
+            if "global_allow" in new_config:
+                self.policy.tool_policy.global_allow = set(new_config["global_allow"])
+
+        elif target_policy == "approval_policy":
+            # new_config: {"required_actions": [...], "auto_approve": bool}
+            if "auto_approve" in new_config:
+                self.policy.approval_policy.auto_approve = new_config["auto_approve"]
+            if "required_actions" in new_config:
+                self.policy.approval_policy.required_actions = set(new_config["required_actions"])
+
+        elif target_policy == "sandbox":
+            # new_config: {"mode": "off"|"tools"|"all", "memory_limit": "256m", ...}
+            from .sandbox import SandboxConfig
+            self.policy.sandbox_manager.config = SandboxConfig(**new_config)
+
+        else:
+            self.audit.log_event(
+                action="policy.change",
+                subject_type="agent" if subject.startswith("agent") else "device",
+                subject_id=subject,
+                target=target_policy,
+                decision=AuditResult.ERROR,
+                decision_reason=f"unknown policy target: {target_policy}",
+                success=False,
+                error_detail=f"unknown policy: {target_policy}",
+            )
+            return False
+
+        self.audit.log_event(
+            action="policy.change",
+            subject_type="agent" if subject.startswith("agent") else "device",
+            subject_id=subject,
+            target=target_policy,
+            decision=AuditResult.SUCCESS,
+            decision_reason=f"policy '{target_policy}' updated by {subject}",
+            success=True,
+            metadata={"changed_keys": list(new_config.keys())},
+        )
+        return True
 
     # Build SSL context if serving TLS directly
         self._ssl_context: ssl.SSLContext | None = None
@@ -471,3 +552,10 @@ class Gateway:
     def _run_cron_job(self, job: ScheduledJob) -> str:
         response = self._run_system_turn(job.prompt)
         return response.run.output
+
+def _str_to_role(role_str: str):
+    """Convert a string like "admin" → Role.ADMIN, or return None if invalid."""
+    for r in Role:
+        if r.value == role_str:
+            return r
+    return None

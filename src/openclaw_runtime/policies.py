@@ -24,6 +24,7 @@ class PolicyDecision:
     subject: str = ""
     requires_approval: bool = False
     approval_id: str | None = None
+    auto_approved: bool = False  # True if this decision was auto-approved (no human needed)
     sandbox_plan: SandboxPlan | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -87,7 +88,17 @@ class ApprovalPolicy:
         if approval_id in self.denied:
             return deny("approval", action, subject, f"approval denied: {approval_id}", approval_id=approval_id)
         if action not in self.required_actions or self.auto_approve or approval_id in self.approved:
-            return allow("approval", action, subject, "approval not required", approval_id=approval_id)
+            d = allow("approval", action, subject, "approval not required", approval_id=approval_id)
+            return PolicyDecision(
+                allowed=True,
+                reason=d.reason,
+                layer=d.layer,
+                action=d.action,
+                subject=d.subject,
+                requires_approval=False,
+                approval_id=approval_id,
+                auto_approved=True,
+            )
         self.pending.setdefault(
             approval_id,
             ApprovalRequest(
@@ -321,22 +332,49 @@ class PolicyEngine:
         tool_name: str,
         args: dict[str, Any] | None = None,
     ) -> PolicyDecision:
-        # ── RBAC check first (default-deny) ────────────────────────────────────
+        # ── Compute sandbox mode ───────────────────────────────────────────────
         sandboxed = (
             self.sandbox_manager is not None
             and self.sandbox_manager.should_sandbox_tool(tool_name)
         )
-        rbac_decision = self.rbac.check_tool(
-            subject=session.agent_id,
-            tool_name=tool_name,
-            sandboxed=sandboxed,
+
+        # ── EXEC_RAW enforcement: tools normally sandboxed need EXEC_RAW if run raw ─
+        # Only applies when a tool is in the sandboxed list but mode is "off"/"tools"
+        # and the tool is actually running without sandbox protection.
+        # Safe tools (not normally sandboxed) skip this check.
+        tool_normally_sandboxed = (
+            self.sandbox_manager is not None
+            and tool_name in self.sandbox_manager.config.sandboxed_tools
         )
-        if not rbac_decision.allowed:
-            d = deny("rbac", "tool.call", tool_name, rbac_decision.reason)
-            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
-                        session.session_key, session.agent_id, tool_name, args,
-                        AuditResult.DENY, d.reason)
-            return d
+        if not sandboxed and tool_normally_sandboxed:
+            rbac_exec = self.rbac.check(
+                subject=session.agent_id,
+                permission=Permission.EXEC_RAW,
+                resource=f"exec:{tool_name}",
+            )
+            if not rbac_exec.allowed:
+                d = deny("rbac", "exec.raw", tool_name, rbac_exec.reason)
+                self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                            session.session_key, session.agent_id, tool_name, args,
+                            AuditResult.DENY, d.reason)
+                return d
+
+        # ── RBAC tool permission check ─────────────────────────────────────────
+        # When sandboxed=False (tool runs directly): EXEC_RAW gates dangerous tools above.
+        # For non-dangerous tools, we allow via tool_policy (default_allow or allow list).
+        # So we only run the full RBAC check when sandboxed=True.
+        if sandboxed:
+            rbac_decision = self.rbac.check_tool(
+                subject=session.agent_id,
+                tool_name=tool_name,
+                sandboxed=True,
+            )
+            if not rbac_decision.allowed:
+                d = deny("rbac", "tool.call", tool_name, rbac_decision.reason)
+                self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                            session.session_key, session.agent_id, tool_name, args,
+                            AuditResult.DENY, d.reason)
+                return d
 
         if not self.tool_policy.allowed(tool_name, agent_id=session.agent_id):
             d = deny("tool", "tool.call", tool_name, f"tool denied: {tool_name}")
@@ -362,10 +400,10 @@ class PolicyEngine:
             return approval
         self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
                     session.session_key, session.agent_id, tool_name, args,
-                    AuditResult.ALLOW if approval.auto_approve else AuditResult.APPROVED,
+                    AuditResult.ALLOW if approval.auto_approved else AuditResult.APPROVED,
                     approval.reason,
                     approval_required=False,
-                    approver="auto" if approval.auto_approve else "")
+                    approver="auto" if approval.auto_approved else "")
         return allow("tool", "tool.call", tool_name, f"tool allowed: {tool_name}", approval_id=approval.approval_id)
 
     def enforce_tool_call(
@@ -437,6 +475,41 @@ class PolicyEngine:
 
     def enforce_message_send(self, session: SessionRecord, content: str) -> PolicyDecision:
         return self.decide_message_send(session, content).raise_if_blocked()
+
+    def decide_policy_change(
+        self,
+        subject: str,
+        target_policy: str,
+    ) -> PolicyDecision:
+        """Check if subject can change a specific policy.
+
+        Policy changes include: tool_policy, channel_policy, approval_policy,
+        message_send_policy, or sandbox settings.
+        """
+        rbac_decision = self.rbac.check(
+            subject=subject,
+            permission=Permission.POLICY_CHANGE,
+            resource=f"policy:{target_policy}",
+        )
+        if not rbac_decision.allowed:
+            d = deny("rbac", "policy.change", target_policy, rbac_decision.reason)
+            self._audit(
+                AuditAction.ERROR,
+                "agent" if subject.startswith("agent") else "device",
+                subject, "", "", target_policy, {},
+                AuditResult.DENY, d.reason,
+                metadata={"action": "policy.change"},
+            )
+            return d
+        d = allow("rbac", "policy.change", target_policy, f"admin can change policy '{target_policy}'")
+        self._audit(
+            AuditAction.ERROR,
+            "agent" if subject.startswith("agent") else "device",
+            subject, "", "", target_policy, {},
+            AuditResult.ALLOW, d.reason,
+            metadata={"action": "policy.change"},
+        )
+        return d
 
     def sandbox_plan_for(self, session: SessionRecord) -> SandboxPlan:
         plan = self.sandbox_manager.plan_for(session)

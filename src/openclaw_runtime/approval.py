@@ -106,6 +106,11 @@ class ApprovalBroker:
         → broker.notify() sends to registered channels
         → broker.wait() blocks until resolved or timed out
         → PolicyEngine enforces the actual allow/deny
+
+    Access control:
+      resolve() requires APPROVAL_ACT permission checked via rbac.check().
+      Set broker.rbac before use; if no rbac is set, resolve() is open
+      (backward-compatible for trusted environments).
     """
 
     def __init__(
@@ -113,12 +118,14 @@ class ApprovalBroker:
         *,
         timeout_seconds: float = 300.0,  # 5 minutes default
         poll_interval: float = 1.0,
+        rbac: Any = None,  # RBAC instance — checked on resolve()
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.poll_interval = poll_interval
         self._records: dict[str, ApprovalRecord] = {}
         self._lock = threading.RLock()
         self._channels: list[ApprovalChannel] = []
+        self._rbac = rbac
 
     # ── Channel registration ─────────────────────────────────────────────────
 
@@ -148,8 +155,30 @@ class ApprovalBroker:
         )
         return record.id
 
+    def set_rbac(self, rbac: Any) -> None:
+        """Set the RBAC engine for resolve() permission checks."""
+        self._rbac = rbac
+
     def resolve(self, approval_id: str, *, approved: bool, resolved_by: str = "", reason: str = "") -> bool:
-        """Resolve a pending approval. Returns True if found and resolved."""
+        """Resolve a pending approval. Returns True if found and resolved.
+
+        Requires APPROVAL_ACT permission if rbac is configured.
+        """
+        # ── RBAC enforcement: only operator/admin can approve/deny ──────────
+        if self._rbac is not None:
+            from .rbac import Permission
+            decision = self._rbac.check(
+                subject=resolved_by or "anonymous",
+                permission=Permission.APPROVAL_ACT,
+                resource=f"approval:{approval_id}",
+            )
+            if not decision.allowed:
+                logger.warning(
+                    "approval resolve BLOCKED by RBAC: subject=%s reason=%s",
+                    resolved_by or "anonymous", decision.reason,
+                )
+                return False
+
         with self._lock:
             record = self._records.get(approval_id)
             if record is None:

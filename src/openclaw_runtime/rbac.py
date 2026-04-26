@@ -305,28 +305,15 @@ class RBAC:
 
     def _has_permission(self, role: Role, permission: Permission, resource: str) -> bool:
         """Check if (role, permission, resource) matches any rule."""
-        resource_patterns = (
-            resource,
-            f"{resource}",   # exact
-            "*",             # wildcard
-        )
-
-        for perm_pat in (permission.value, "*"):
-            for res_pat in resource_patterns + ("*",):
-                if (role, permission, res_pat) in self._rules:
-                    return True
-                # Also try "perm:*" style wildcard on the permission
-                if (role, permission, "*") in self._rules:
-                    return True
-
-        # Try fnmatch-style patterns
         for rule_role, rule_perm, rule_res in self._rules:
             if rule_role != role:
                 continue
-            if rule_perm != permission and rule_perm != Permission.TOOL_CALL_SAFE:
-                # Check if rule_perm is a wildcard
-                if not (rule_perm.value == "*" or rule_perm == permission):
+            # Permission must match: exact, or rule is a wildcard
+            if rule_perm != permission and rule_perm.value != "*":
+                # TOOL_CALL_SAFE also satisfies TOOL_CALL request
+                if not (rule_perm == Permission.TOOL_CALL_SAFE and permission == Permission.TOOL_CALL):
                     continue
+            # Resource pattern must match
             if _pattern_matches(rule_res, resource):
                 return True
         return False
@@ -355,11 +342,12 @@ class RBAC:
 
 
 def _pattern_matches(pattern: str, value: str) -> bool:
-    """Simple fnmatch-style matching: foo*, *."""
+    """fnmatch-style matching: foo*, *, foo:bar."""
     if pattern == "*":
         return True
+    # "tool:*" matches "tool:exec", "tool:memory_search" etc.
     if pattern.endswith("*"):
-        prefix = pattern[:-1]
+        prefix = pattern[:-1]  # "tool:" matches "tool:exec"
         return value.startswith(prefix)
     return pattern == value
 
