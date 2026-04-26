@@ -159,6 +159,11 @@ class AuditLogger:
         self.max_files = max_files
         self.compress_rotated = compress_rotated
         self._file = self._open()
+        self._alerts: Any = None  # AlertManager injected by Gateway
+
+    def set_alerts(self, alerts: Any) -> None:
+        """Inject AlertManager. Called by Gateway after both are created."""
+        self._alerts = alerts
 
     def _open(self) -> Any:
         self.audit_dir.mkdir(parents=True, exist_ok=True)
@@ -171,8 +176,16 @@ class AuditLogger:
             self._file.flush()
             # Check rotation after every write
             self._maybe_rotate()
+            # Fire immediate alert rules
+            if self._alerts is not None:
+                try:
+                    self._alerts.evaluate_audit(event)
+                except Exception as exc:
+                    logger.error("alert evaluation failed: %s", exc)
         except Exception as exc:
             logger.error("audit log write failed: %s", exc, exc_info=True)
+            if self._alerts is not None:
+                self._alerts.record_audit_failure()
 
     def _maybe_rotate(self) -> None:
         path = self.log_path
@@ -203,6 +216,11 @@ class AuditLogger:
         path.touch()
 
         self._file = self._open()
+        self._alerts: Any = None  # AlertManager injected by Gateway
+
+    def set_alerts(self, alerts: Any) -> None:
+        """Inject AlertManager. Called by Gateway after both are created."""
+        self._alerts = alerts
 
     def log_event(
         self,

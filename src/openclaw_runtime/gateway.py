@@ -12,6 +12,7 @@ from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
 from .approval import ApprovalBroker, ApprovalServer
 from .rbac import RBAC, Role
 from .audit import AuditLogger, AuditResult
+from .alerts import AlertManager, FeishuAlertChannel, LogAlertChannel
 from .hooks import HookEngine, PluginContext, PluginManager
 from .messaging import ChannelBridge, DictChannelBridge, InternalMessage
 from .nodes import NodeRegistry
@@ -208,6 +209,9 @@ class Gateway:
 
         # Audit logger — writes structured JSON Lines to .openclaw/audit/audit.log
         self.audit = AuditLogger(self.workspace)
+        self.alerts = AlertManager()
+        self.alerts.register_channel(LogAlertChannel())
+        self.audit.set_alerts(self.alerts)
         self.policy = policy_engine or PolicyEngine(
             channel_policy=ChannelAllowlistPolicy(
                 allowed_channels=set(config.allowed_channels),
@@ -236,7 +240,7 @@ class Gateway:
         self.approval_broker = ApprovalBroker(
             timeout_seconds=config.approval_timeout_seconds,
             rbac=self.rbac,  # RBAC enforcement on approve/deny actions
-            audit_logger=self.audit_logger,  # Audit logging for approval RBAC decisions
+            audit_logger=self.audit,  # Audit logging for approval RBAC decisions
         )
         # Optional: attach an approval server for webhook callbacks (start separately)
         self.approval_server: ApprovalServer | None = None
