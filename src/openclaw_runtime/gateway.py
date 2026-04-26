@@ -9,6 +9,7 @@ from typing import Any
 from openclaw_memory import WorkspaceMemory
 
 from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
+from .audit import AuditLogger
 from .hooks import HookEngine, PluginContext, PluginManager
 from .messaging import ChannelBridge, DictChannelBridge, InternalMessage
 from .nodes import NodeRegistry
@@ -190,6 +191,8 @@ class Gateway:
         self.sandbox = SandboxManager(config.sandbox)
         self.nodes = NodeRegistry()
         self.trust = DeviceTrustStore(gateway_token=config.gateway_token)
+        # Audit logger — writes structured JSON Lines to .openclaw/audit/audit.log
+        self.audit = AuditLogger(self.workspace)
         self.policy = policy_engine or PolicyEngine(
             channel_policy=ChannelAllowlistPolicy(
                 allowed_channels=set(config.allowed_channels),
@@ -206,6 +209,7 @@ class Gateway:
             tool_policy=self.tools.policy,
             trust_store=self.trust,
             sandbox_manager=self.sandbox,
+            audit_logger=self.audit,
         )
         self.bridges: dict[str, ChannelBridge] = {"dict": DictChannelBridge("dict")}
         self.cron = CronScheduler()

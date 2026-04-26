@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .audit import AuditAction, AuditLogger, AuditResult
 from .messaging import InternalMessage
 from .sandbox import SandboxManager, SandboxPlan
 from .security import DeviceTrustStore
@@ -163,6 +165,7 @@ class PolicyEngine:
         tool_policy: ToolPolicy | None = None,
         trust_store: DeviceTrustStore | None = None,
         sandbox_manager: SandboxManager | None = None,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self.channel_policy = channel_policy or ChannelAllowlistPolicy()
         self.approval_policy = approval_policy or ApprovalPolicy()
@@ -170,6 +173,43 @@ class PolicyEngine:
         self.tool_policy = tool_policy or ToolPolicy(default_allow=True)
         self.trust_store = trust_store or DeviceTrustStore()
         self.sandbox_manager = sandbox_manager or SandboxManager()
+        self.audit_logger = audit_logger
+
+    def _audit(
+        self,
+        action: AuditAction,
+        subject_type: str,
+        subject_id: str,
+        session_key: str,
+        agent_id: str,
+        target: str,
+        args: dict[str, Any] | None,
+        decision: AuditResult,
+        reason: str,
+        approval_required: bool = False,
+        approver: str = "",
+        success: bool = True,
+        error_detail: str = "",
+        **metadata: Any,
+    ) -> None:
+        if self.audit_logger is None:
+            return
+        self.audit_logger.log_event(
+            action=action,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            session_key=session_key,
+            agent_id=agent_id,
+            target=target,
+            args=args,
+            decision=decision,
+            decision_reason=reason,
+            approval_required=approval_required,
+            approver=approver,
+            success=success,
+            error_detail=error_detail,
+            **metadata,
+        )
 
     def decide_connection(
         self,
@@ -179,12 +219,24 @@ class PolicyEngine:
         device_token: str | None = None,
     ) -> PolicyDecision:
         if not self.trust_store.authenticate_gateway(gateway_token):
-            return deny("gateway", "gateway.connect", device_id or "unknown", "gateway token rejected")
+            d = deny("gateway", "gateway.connect", device_id or "unknown", "gateway token rejected")
+            self._audit(AuditAction.CONNECTION, "device", device_id or "unknown", "", "",
+                        device_id or "unknown", None, AuditResult.DENY, d.reason)
+            return d
         if device_id is None:
-            return allow("gateway", "gateway.connect", "anonymous", "gateway token accepted")
+            d = allow("gateway", "gateway.connect", "anonymous", "gateway token accepted")
+            self._audit(AuditAction.CONNECTION, "device", "anonymous", "", "",
+                        "anonymous", None, AuditResult.ALLOW, d.reason)
+            return d
         if not device_token or not self.trust_store.verify_device(device_id, device_token):
-            return deny("trust", "device.connect", device_id, f"device not trusted: {device_id}")
-        return allow("trust", "device.connect", device_id, f"device trusted: {device_id}")
+            d = deny("trust", "device.connect", device_id, f"device not trusted: {device_id}")
+            self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
+                        device_id, None, AuditResult.DENY, d.reason)
+            return d
+        d = allow("trust", "device.connect", device_id, f"device trusted: {device_id}")
+        self._audit(AuditAction.CONNECTION, "device", device_id, "", "",
+                    device_id, None, AuditResult.ALLOW, d.reason)
+        return d
 
     def enforce_connection(
         self,
@@ -200,7 +252,19 @@ class PolicyEngine:
         ).raise_if_blocked()
 
     def decide_inbound(self, message: InternalMessage) -> PolicyDecision:
-        return self.channel_policy.decide(message)
+        d = self.channel_policy.decide(message)
+        self._audit(
+            AuditAction.CHANNEL_RECEIVE,
+            "user",
+            message.peer_id,
+            "",
+            "",
+            message.channel,
+            {"text_len": len(message.text), "group_id": message.group_id},
+            AuditResult.ALLOW if d.allowed else AuditResult.DENY,
+            d.reason,
+        )
+        return d
 
     def enforce_inbound(self, message: InternalMessage) -> PolicyDecision:
         return self.decide_inbound(message).raise_if_blocked()
@@ -212,7 +276,11 @@ class PolicyEngine:
         args: dict[str, Any] | None = None,
     ) -> PolicyDecision:
         if not self.tool_policy.allowed(tool_name, agent_id=session.agent_id):
-            return deny("tool", "tool.call", tool_name, f"tool denied: {tool_name}")
+            d = deny("tool", "tool.call", tool_name, f"tool denied: {tool_name}")
+            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                        session.session_key, session.agent_id, tool_name, args,
+                        AuditResult.DENY, d.reason)
+            return d
         approval = self.approval_policy.decide(
             "tool.call",
             tool_name,
@@ -223,7 +291,18 @@ class PolicyEngine:
             },
         )
         if not approval.allowed:
+            self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                        session.session_key, session.agent_id, tool_name, args,
+                        AuditResult.REQUIRE_APPROVAL, approval.reason,
+                        approval_required=True,
+                        approval_id=approval.approval_id)
             return approval
+        self._audit(AuditAction.TOOL_CALL, "agent", session.agent_id,
+                    session.session_key, session.agent_id, tool_name, args,
+                    AuditResult.ALLOW if approval.auto_approve else AuditResult.APPROVED,
+                    approval.reason,
+                    approval_required=False,
+                    approver="auto" if approval.auto_approve else "")
         return allow("tool", "tool.call", tool_name, f"tool allowed: {tool_name}", approval_id=approval.approval_id)
 
     def enforce_tool_call(
@@ -237,6 +316,10 @@ class PolicyEngine:
     def decide_message_send(self, session: SessionRecord, content: str) -> PolicyDecision:
         message_decision = self.message_send_policy.decide(session, content)
         if not message_decision.allowed:
+            self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                        session.session_key, session.agent_id, session.channel,
+                        {"content_len": len(content), "group_id": session.group_id},
+                        AuditResult.DENY, message_decision.reason)
             return message_decision
         approval = self.approval_policy.decide(
             "message.send",
@@ -249,7 +332,17 @@ class PolicyEngine:
             },
         )
         if not approval.allowed:
+            self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                        session.session_key, session.agent_id, session.channel,
+                        {"content_len": len(content), "group_id": session.group_id},
+                        AuditResult.REQUIRE_APPROVAL, approval.reason,
+                        approval_required=True, approval_id=approval.approval_id)
             return approval
+        self._audit(AuditAction.MESSAGE_SEND, "agent", session.agent_id,
+                    session.session_key, session.agent_id, session.channel,
+                    {"content_len": len(content), "group_id": session.group_id},
+                    AuditResult.ALLOW, approval.reason,
+                    approval_required=False, approver="auto" if approval.auto_approve else "")
         return allow(
             "message",
             "message.send",
@@ -262,7 +355,15 @@ class PolicyEngine:
         return self.decide_message_send(session, content).raise_if_blocked()
 
     def sandbox_plan_for(self, session: SessionRecord) -> SandboxPlan:
-        return self.sandbox_manager.plan_for(session)
+        plan = self.sandbox_manager.plan_for(session)
+        self._audit(
+            AuditAction.SANDBOX_PLAN, "agent", session.agent_id,
+            session.session_key, session.agent_id, "sandbox",
+            {"enabled": plan.enabled, "scope": plan.scope_key},
+            AuditResult.ALLOW if plan.enabled else AuditResult.DENY,
+            f"sandbox plan: enabled={plan.enabled}, scope={plan.scope_key}",
+        )
+        return plan
 
 
 def allow(

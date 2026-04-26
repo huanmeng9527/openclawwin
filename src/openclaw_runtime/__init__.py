@@ -1,6 +1,7 @@
 """Reference OpenClaw runtime architecture."""
 
 from .agent import AgentRuntime, EchoModelProvider, ModelOutput
+from .audit import AuditAction, AuditEvent, AuditLogger, AuditResult
 from .gateway import Gateway, GatewayConfig
 from .messaging import ChannelBridge, InternalMessage
 from .policies import (
@@ -16,6 +17,10 @@ from .sessions import SessionManager, SessionRecord
 
 __all__ = [
     "AgentRuntime",
+    "AuditAction",
+    "AuditEvent",
+    "AuditLogger",
+    "AuditResult",
     "ChannelBridge",
     "EchoModelProvider",
     "Gateway",
