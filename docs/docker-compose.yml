@@ -1,0 +1,83 @@
+# docker-compose.yml — OpenClaw Gateway + Caddy TLS Proxy
+# Usage:
+#   cp .env.example .env  # fill in your DOMAIN and EMAIL
+#   docker compose up -d
+#
+# The gateway container only exposes to the Docker internal network.
+# Caddy handles all external HTTPS/WSS traffic and forwards to gateway.
+
+services:
+  # ─── OpenClaw Gateway (plaintext, no public exposure) ───
+  gateway:
+    image: python:3.13-slim
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./workspace:/app/workspace:rw
+      - ./skills:/app/skills:ro
+      - ./secrets/gateway_token:/run/secrets/gateway_token:ro
+    environment:
+      # Bind to localhost only — NOT exposed outside this compose network
+      OPENCLAW_HOST: "127.0.0.1"
+      OPENCLAW_PORT: "8080"
+      # Gateway token from secret (set in .env or secrets/)
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-}"
+    command: >
+      python -c "
+      from openclaw_runtime.gateway import Gateway, GatewayConfig, TLSConfig;
+      from pathlib import Path;
+      import os;
+      token = os.environ.get('OPENCLAW_GATEWAY_TOKEN');
+      gw = Gateway(GatewayConfig(
+          workspace=Path('/app/workspace'),
+          gateway_token=token or None,
+          tls=TLSConfig(enabled=False),
+      ));
+      gw.serve_http(host='0.0.0.0', port=8080)
+      "
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Security: non-root user, read-only filesystem (workspace mounted rw)
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # ─── Caddy TLS Reverse Proxy ───
+  caddy:
+    image: caddy:3-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # Uncomment for TLS debugging (disable in production)
+      # - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy_data:/data
+      - ./caddy_config:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    environment:
+      DOMAIN: "${DOMAIN:-openclaw.example.com}"
+      EMAIL: "${EMAIL:-admin@example.com}"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    # Caddy container runs as non-root user (built-in)
+
+networks:
+  internal:
+    driver: bridge
+    # No external access — only Caddy can reach gateway

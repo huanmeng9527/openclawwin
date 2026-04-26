@@ -1,0 +1,83 @@
+# Caddy TLS/WSS Reverse Proxy for OpenClaw Gateway
+# Place as Caddyfile in /etc/caddy/ or ~/caddy/
+#
+# Prereq:
+#   sudo apt install -y apt-transport-https
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo tee /etc/apt/keyring/caddy-archive-keyring.gpg
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#   sudo apt update && sudo apt install caddy
+#
+# Run: caddy fmt --overwrite && sudo systemctl reload caddy
+# Auto HTTPS via Let's Encrypt enabled by default.
+
+# ─── Global Options ───
+{
+    # Minimum TLS version
+    email admin@your-domain.com
+
+    # Optional: run on non-standard ports during dev
+    # admin off
+    # http_port 80
+    # https_port 443
+}
+
+# ─── Sites ───
+your-domain.com {
+
+    # TLS: managed by Caddy (Let's Encrypt / zero-config)
+    # Uncomment for custom cert:
+    # tls /etc/ssl/certs/your-cert.pem /etc/ssl/private/your-key.pem {
+    #     protocols tls1.2 tls1.3
+    #     ciphers ECDHE-ECDSA-AES128-GCM-SHA256 ECDHE-RSA-AES128-GCM-SHA256
+    # }
+
+    # Strict Transport Security
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    header X-Content-Type-Options "nosniff"
+    header X-Frame-Options "DENY"
+    header X-XSS-Protection "1; mode=block"
+    header Referrer-Policy "strict-origin-when-cross-origin"
+    header Content-Security-Policy "default-src 'self'; connect-src 'self' wss://your-domain.com https://your-domain.com; frame-ancestors 'none'"
+
+    # Rate limiting
+    @limit {
+        path /*
+        not remote_ip 127.0.0.1 ::1
+    }
+    handle @limit {
+        limit_req zone=openclaw burst=50
+        limit_conn conn_limit 20
+    }
+
+    # WebSocket proxy to gateway
+    reverse_proxy /ws* 127.0.0.1:8080 {
+        # WebSocket support
+        without /ws
+        transport http {
+            dial_timeout  60s
+            read_timeout  300s
+            write_timeout 300s
+        }
+    }
+
+    # Main gateway endpoint
+    reverse_proxy 127.0.0.1:8080 {
+        health_uri /health
+        health_interval 10s
+        health_timeout 5s
+    }
+
+    # Access log (optional: sent to stdout for journald)
+    log {
+        output file /var/log/caddy/openclaw-access.log
+        format filter {
+            wrap console
+        }
+    }
+}
+
+# ─── Local dev (no TLS, no domain required) ───
+# Run with: caddy run --config Caddyfile.dev
+:8080 {
+    reverse_proxy 127.0.0.1:8080
+}
