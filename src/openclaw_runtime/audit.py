@@ -267,3 +267,100 @@ class AuditLogger:
 # Modules that need to emit audit events receive an AuditLogger instance
 # via dependency injection.  There is no global singleton by design — this
 # makes testing easier and keeps the audit trail explicit rather than implicit.
+
+
+# ── Query utility ────────────────────────────────────────────────────────────
+
+    def query(
+        self,
+        action: AuditAction | str | None = None,
+        subject_id: str | None = None,
+        subject_role: str | None = None,
+        permission: str | None = None,
+        resource: str | None = None,
+        decision: AuditResult | str | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        """Query audit log with filters. Returns matching events in reverse-chronological order."""
+        import fnmatch
+
+        events: list[AuditEvent] = []
+        decision_str = decision.value if isinstance(decision, AuditResult) else decision
+
+        # Read current log file + all rotated .gz files
+        log_files = []
+        audit_dir = Path(self.log_path).parent
+        pattern = Path(self.log_path).name
+
+        # Current file
+        p = Path(self.log_path)
+        if p.exists():
+            log_files.append((p, None))
+        # Rotated files
+        for i in range(1, self.max_files + 1):
+            for suffix in [f".{i}", f".{i}.gz"]:
+                rp = Path(f"{p}{suffix}")
+                if rp.exists():
+                    log_files.append((rp, suffix))
+
+        for path, suffix in log_files:
+            try:
+                if suffix == ".gz" or (suffix is None and str(path).endswith(".gz")):
+                    import gzip
+                    opener = gzip.open  # "rt" is default mode for gzip.open
+                else:
+                    opener = open
+
+                with opener(path) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            import json
+                            obj = json.loads(line)
+                            ev = AuditEvent(
+                                action=AuditAction(obj.get("action", "")),
+                                subject_type=obj.get("subject_type", "unknown"),
+                                subject_id=obj.get("subject_id", ""),
+                                session_key=obj.get("session_key", ""),
+                                agent_id=obj.get("agent_id", ""),
+                                run_id=obj.get("run_id", ""),
+                                target=obj.get("target", ""),
+                                args_summary=obj.get("args", {}),
+                                decision=AuditResult(obj.get("decision", "deny")),
+                                decision_reason=obj.get("decision_reason", ""),
+                                approval_required=obj.get("approval_required", False),
+                                approver=obj.get("approver", ""),
+                                approval_result=obj.get("approval_result", ""),
+                                success=obj.get("success", True),
+                                error_detail=obj.get("error_detail", ""),
+                                timestamp=obj.get("timestamp", ""),
+                                subject_role=obj.get("subject_role", ""),
+                                permission=obj.get("permission", ""),
+                                resource=obj.get("resource", ""),
+                            )
+                        except Exception:
+                            continue
+
+                        # Apply filters
+                        if action is not None and ev.action != action:
+                            continue
+                        if subject_id is not None and not fnmatch.fnmatch(ev.subject_id, subject_id):
+                            continue
+                        if subject_role is not None and not fnmatch.fnmatch(ev.subject_role or "", subject_role):
+                            continue
+                        if permission is not None and not fnmatch.fnmatch(ev.permission or "", permission):
+                            continue
+                        if resource is not None and not fnmatch.fnmatch(ev.resource or "", resource):
+                            continue
+                        if decision_str is not None and ev.decision.value != decision_str:
+                            continue
+
+                        events.append(ev)
+                        if len(events) >= limit:
+                            return events
+            except Exception:
+                continue
+
+        return events
