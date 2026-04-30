@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openclaw-reference-runtime"
+version = "0.1.0"
+description = "Reference OpenClaw runtime architecture with Gateway, Agent Runtime, and four-layer memory."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "OpenClaw Memory Contributors" }]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.scripts]
+openclaw = "openclaw_runtime.cli:main"
+openclaw-memory = "openclaw_memory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
