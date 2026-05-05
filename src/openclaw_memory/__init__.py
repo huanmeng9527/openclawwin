@@ -1,5 +1,6 @@
 """OpenClaw-style offline workspace memory."""
 
+<<<<<<< HEAD
 from .layers import (
     ProceduralMemoryLayer,
     SemanticMemoryLayer,
@@ -38,3 +39,9 @@ __all__ = [
     "MEMORY_REINDEX",
     "MEMORY_WRITE",
 ]
+=======
+from .models import Fact, RecallResult
+from .store import WorkspaceMemory
+
+__all__ = ["Fact", "RecallResult", "WorkspaceMemory"]
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc

@@ -67,6 +67,7 @@ class AgentRuntime:
         self.timeout_seconds = timeout_seconds
 
     def run(self, session: SessionRecord, user_text: str, *, heartbeat: bool = False) -> AgentRunResult:
+<<<<<<< HEAD
         return self.run_with_context(session, user_text, heartbeat=heartbeat)
 
     def run_with_context(
@@ -92,6 +93,12 @@ class AgentRuntime:
             memory_budget_chars=memory_budget_chars,
             memory_context=memory_context,
         )
+=======
+        run_id = uuid4().hex
+        context = {"runId": run_id, "session": session, "userText": user_text}
+        self.hooks.emit("before_agent_start", context)
+        prompt = self.prompt_assembler.assemble(session, user_text=user_text, heartbeat=heartbeat)
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
         model_output = self.model.generate(system=prompt.system, user_text=user_text, session=session)
         events: list[dict[str, Any]] = []
         tool_results = []

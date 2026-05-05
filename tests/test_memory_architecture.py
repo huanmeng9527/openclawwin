@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+<<<<<<< HEAD
 from datetime import date
+=======
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
 from pathlib import Path
 
 from openclaw_memory import WorkspaceMemory
@@ -53,7 +56,11 @@ class WorkspaceMemoryTests(unittest.TestCase):
                 kind="O",
                 entities=["Peter"],
                 confidence=0.95,
+<<<<<<< HEAD
                 day=date.today().isoformat(),
+=======
+                day="2026-04-25",
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
             )
 
             first_counts = memory.reflect(since_days=1)

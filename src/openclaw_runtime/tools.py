@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+<<<<<<< HEAD
 from openclaw_memory import MemoryRecord, MemoryRouter, WorkspaceMemory
+=======
+from openclaw_memory import WorkspaceMemory
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -98,6 +102,7 @@ def register_memory_tools(registry: ToolRegistry, memory: WorkspaceMemory) -> No
             ],
         )
     )
+<<<<<<< HEAD
 
 
 def register_memory_router_tools(registry: ToolRegistry, router: MemoryRouter) -> None:
@@ -191,3 +196,5 @@ def record_from_args(args: dict[str, Any]) -> MemoryRecord:
         visibility=str(args.get("visibility", "private")),
         risk_level=str(args.get("risk_level", "low")),
     )
+=======
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc

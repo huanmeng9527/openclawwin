@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+<<<<<<< HEAD
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+=======
+from typing import Any
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
 
 
 KIND_PREFIXES = {
@@ -59,6 +63,7 @@ class RecallResult:
         payload = self.fact.to_dict()
         payload["score"] = self.score
         return payload
+<<<<<<< HEAD
 
 
 MEMORY_LAYERS = frozenset({"working", "session", "semantic", "procedural"})
@@ -222,3 +227,5 @@ def optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+=======
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc

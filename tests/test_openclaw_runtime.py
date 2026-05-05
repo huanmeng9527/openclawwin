@@ -127,6 +127,7 @@ class OpenClawRuntimeTests(unittest.TestCase):
             self.assertTrue(response.delivered)
             self.assertIn("[tool:memory_search]", response.run.output)
 
+<<<<<<< HEAD
     def test_memory_write_tool_is_blocked_by_policy_engine_and_memory_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             denied_gateway = Gateway(
@@ -176,6 +177,8 @@ class OpenClawRuntimeTests(unittest.TestCase):
             self.assertTrue(response.delivered)
             self.assertIn("tool-semantic", response.run.output)
 
+=======
+>>>>>>> 46c87c7efb713265d6ff4ece94e24cde9c5ed8cc
     def test_policy_engine_blocks_outbound_message_channels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             gateway = Gateway(
