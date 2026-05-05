@@ -127,6 +127,55 @@ class OpenClawRuntimeTests(unittest.TestCase):
             self.assertTrue(response.delivered)
             self.assertIn("[tool:memory_search]", response.run.output)
 
+    def test_memory_write_tool_is_blocked_by_policy_engine_and_memory_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            denied_gateway = Gateway(
+                GatewayConfig(workspace=directory),
+                tool_registry=ToolRegistry(ToolPolicy(default_allow=False)),
+            )
+            denied_gateway.runtime.model = CaptureModel(
+                ModelOutput(
+                    "write",
+                    tool_calls=(
+                        ToolCall(
+                            "memory.write",
+                            {
+                                "layer": "semantic",
+                                "content": "tool write should be denied first",
+                                "context": {"permissions": ["memory.write"]},
+                            },
+                        ),
+                    ),
+                )
+            )
+
+            with self.assertRaises(PolicyDenied):
+                denied_gateway.receive(InternalMessage(channel="telegram", peer_id="alice", text="write"))
+
+            allowed_registry = ToolRegistry(ToolPolicy(global_allow={"memory.write"}, default_allow=False))
+            allowed_gateway = Gateway(GatewayConfig(workspace=directory), tool_registry=allowed_registry)
+            allowed_gateway.runtime.model = CaptureModel(
+                ModelOutput(
+                    "write",
+                    tool_calls=(
+                        ToolCall(
+                            "memory.write",
+                            {
+                                "id": "tool-semantic",
+                                "layer": "semantic",
+                                "content": "tool write should persist",
+                                "context": {"permissions": ["memory.write"]},
+                            },
+                        ),
+                    ),
+                )
+            )
+
+            response = allowed_gateway.receive(InternalMessage(channel="telegram", peer_id="alice", text="write"))
+
+            self.assertTrue(response.delivered)
+            self.assertIn("tool-semantic", response.run.output)
+
     def test_policy_engine_blocks_outbound_message_channels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             gateway = Gateway(

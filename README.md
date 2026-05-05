@@ -22,10 +22,14 @@
 
 ## 四层结构
 
-1. `memory.md`：核心记忆，保存每次会话都应进入上下文的稳定事实和偏好。
-2. `memory/YYYY-MM-DD.md`：每日记忆，只追加日志，并在 `## Retain` 小节里沉淀自包含事实。
-3. `bank/`：结构化长期记忆，由反思任务生成，也可以人工编辑。
-4. `.memory/index.sqlite`：派生检索索引，可从 Markdown 随时重建。
+1. L1 Working Memory：进程内短上下文，保存当前 turn、工具结果和 scratchpad。
+2. L2 Session Memory：SQLite 持久化事件记忆，支持会话内 FTS/BM25 检索和摘要。
+3. L3 Long-term Semantic Memory：Markdown 真源 + SQLite FTS 索引，保存 facts、preferences、project notes、decisions、known issues。
+4. L4 Procedural / Skill / Policy Memory：Markdown 真源 + SQLite FTS 索引，保存 skill recipes、tool usage patterns、policy hints、runbooks。
+
+`PromptAssembler` 会通过 `MemoryRouter.retrieve_for_prompt()` 将四层记忆按 `[Memory Context]` 注入 prompt。L3/L4 只有在 prompt context 带 `memory.read` 权限时才会注入；L4 只提供操作提示，不授予工具权限。
+
+详细说明见 `docs/memory_architecture.md`。
 
 ## 快速开始
 
@@ -80,13 +84,15 @@ gateway = Gateway(
 库入口是 `openclaw_memory.WorkspaceMemory`：
 
 ```python
-from openclaw_memory import WorkspaceMemory
+from openclaw_memory import MemoryRecord, MemoryRouter
 
-memory = WorkspaceMemory("./workspace")
-memory.init()
-memory.retain("Fixed the Baileys WS crash.", kind="B", entities=["warelay"])
-memory.rebuild_index()
-results = memory.recall("Baileys crash", limit=5)
+router = MemoryRouter("./workspace")
+router.write(
+    MemoryRecord.create(layer="semantic", content="Project prefers SQLite FTS for now."),
+    context={"permissions": {"memory.write"}},
+)
+router.reindex("semantic", context={"permissions": {"memory.reindex"}})
+results = router.retrieve("SQLite FTS", context={}, layers=("semantic",))
 ```
 
 CLI 也兼容 `openclaw memory ...` 风格的参数剥离，方便后续接入主 CLI。

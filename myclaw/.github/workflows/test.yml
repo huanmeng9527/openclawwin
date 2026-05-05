@@ -1,0 +1,26 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install
+      - run: npm test
+      - run: npm run check:syntax
+      - run: npm run smoke:memory
+      - run: node bin/myclaw.js --help
+      - name: init with isolated MYCLAW_HOME
+        run: |
+          export MYCLAW_HOME="$(mktemp -d)"
+          node bin/myclaw.js init
+          test -f "$MYCLAW_HOME/myclaw.json"
+          test -d "$MYCLAW_HOME/workspace"

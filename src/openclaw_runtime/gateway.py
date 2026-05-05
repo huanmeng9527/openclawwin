@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from openclaw_memory import WorkspaceMemory
+from openclaw_memory import MEMORY_READ, MemoryPolicyGate, MemoryRouter, WorkspaceMemory
 
 from .agent import AgentRuntime, AgentRunResult, EchoModelProvider
 from .hooks import HookEngine, PluginContext, PluginManager
@@ -22,7 +22,7 @@ from .scheduler import CronScheduler, HeartbeatSystem, ScheduledJob
 from .security import DeviceTrustStore
 from .sessions import SessionManager, SessionRecord
 from .skills import SkillLoader
-from .tools import ToolPolicy, ToolRegistry, register_memory_tools
+from .tools import ToolPolicy, ToolRegistry, register_memory_router_tools, register_memory_tools
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,8 @@ class GatewayConfig:
     outbound_denied_channels: tuple[str, ...] = ()
     require_approval_for: tuple[str, ...] = ()
     auto_approve: bool = True
+    prompt_memory_permissions: tuple[str, ...] = (MEMORY_READ,)
+    prompt_memory_budget_chars: int = 4_000
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,11 @@ class Gateway:
             trust_store=self.trust,
             sandbox_manager=self.sandbox,
         )
+        self.memory_router = MemoryRouter(
+            self.workspace,
+            policy_gate=MemoryPolicyGate(self.policy),
+        )
+        register_memory_router_tools(self.tools, self.memory_router)
         self.bridges: dict[str, ChannelBridge] = {"dict": DictChannelBridge("dict")}
         self.cron = CronScheduler()
         self.heartbeat = HeartbeatSystem()
@@ -107,8 +114,10 @@ class Gateway:
             prompt_assembler=PromptAssembler(
                 self.workspace,
                 memory=self.memory,
+                memory_router=self.memory_router,
                 tool_registry=self.tools,
                 skill_loader=self.skills,
+                memory_budget_chars=config.prompt_memory_budget_chars,
             ),
             tool_registry=self.tools,
             hooks=self.hooks,
@@ -162,7 +171,20 @@ class Gateway:
         session, message = command.payload
         sandbox_plan = self.policy.sandbox_plan_for(session)
         self.hooks.emit("sandbox:plan", {"session": session, "plan": sandbox_plan})
-        run = self.runtime.run(session, message.text)
+        run = self.runtime.run_with_context(
+            session,
+            message.text,
+            user_id=message.peer_id,
+            lane_id=command.lane,
+            memory_budget_chars=self.config.prompt_memory_budget_chars,
+            memory_context={
+                "session_id": session.session_id,
+                "agent_id": session.agent_id,
+                "user_id": message.peer_id,
+                "lane_id": command.lane,
+                "permissions": set(self.config.prompt_memory_permissions),
+            },
+        )
         delivered = False
         if not run.no_reply:
             self.policy.enforce_message_send(session, run.output)
@@ -174,7 +196,21 @@ class Gateway:
     def _run_system_turn(self, prompt: str, *, heartbeat: bool = False) -> GatewayResponse:
         message = InternalMessage(channel="system", peer_id="main", text=prompt)
         session = self.sessions.resolve_message(message)
-        run = self.runtime.run(session, prompt, heartbeat=heartbeat)
+        run = self.runtime.run_with_context(
+            session,
+            prompt,
+            heartbeat=heartbeat,
+            user_id=message.peer_id,
+            lane_id="system",
+            memory_budget_chars=self.config.prompt_memory_budget_chars,
+            memory_context={
+                "session_id": session.session_id,
+                "agent_id": session.agent_id,
+                "user_id": message.peer_id,
+                "lane_id": "system",
+                "permissions": set(self.config.prompt_memory_permissions),
+            },
+        )
         delivered = False
         if not run.no_reply:
             self.policy.enforce_message_send(session, run.output)

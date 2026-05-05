@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from openclaw_memory import WorkspaceMemory
+from openclaw_memory import MemoryRecord, MemoryRouter, WorkspaceMemory
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -97,4 +97,97 @@ def register_memory_tools(registry: ToolRegistry, memory: WorkspaceMemory) -> No
                 )
             ],
         )
+    )
+
+
+def register_memory_router_tools(registry: ToolRegistry, router: MemoryRouter) -> None:
+    registry.register(
+        Tool(
+            name="memory.search",
+            description="Search OpenClaw four-layer memory.",
+            schema={"query": "string", "layers": "array", "limit": "integer", "context": "object"},
+            handler=lambda args: [
+                result.to_dict()
+                for result in router.retrieve(
+                    str(args.get("query", "")),
+                    context=dict(args.get("context") or {}),
+                    layers=tuple(args["layers"]) if args.get("layers") else None,
+                    limit=int(args.get("limit", 10)),
+                    budget_tokens=args.get("budget_tokens"),
+                )
+            ],
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory.write",
+            description="Write a record to working, session, semantic, or procedural memory.",
+            schema={"layer": "string", "content": "string", "context": "object"},
+            handler=lambda args: router.write(
+                record_from_args(args),
+                requested_layer=args.get("layer"),
+                context=dict(args.get("context") or {}),
+            ).to_dict(),
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory.delete",
+            description="Delete a memory record from a specific layer.",
+            schema={"id": "string", "layer": "string", "context": "object"},
+            handler=lambda args: {
+                "deleted": router.delete(
+                    str(args["id"]),
+                    layer=str(args["layer"]),
+                    context=dict(args.get("context") or {}),
+                )
+            },
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory.reindex",
+            description="Rebuild semantic/procedural SQLite FTS indexes from Markdown truth.",
+            schema={"layer": "string", "context": "object"},
+            handler=lambda args: router.reindex(
+                layer=args.get("layer"),
+                context=dict(args.get("context") or {}),
+            ),
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory.summarize_session",
+            description="Summarize session episodic memory.",
+            schema={"session_id": "string", "limit": "integer"},
+            handler=lambda args: {
+                "session_id": str(args["session_id"]),
+                "summary": router.session.summarize_session(
+                    str(args["session_id"]),
+                    limit=int(args.get("limit", 50)),
+                ),
+            },
+        )
+    )
+
+
+def record_from_args(args: dict[str, Any]) -> MemoryRecord:
+    return MemoryRecord.create(
+        id=args.get("id"),
+        layer=str(args.get("layer", "working")),
+        namespace=str(args.get("namespace", "default")),
+        scope=str(args.get("scope", "global")),
+        session_id=args.get("session_id"),
+        agent_id=args.get("agent_id"),
+        user_id=args.get("user_id"),
+        key=args.get("key"),
+        title=str(args.get("title", "")),
+        content=str(args["content"]),
+        tags=tuple(args.get("tags") or ()),
+        metadata=dict(args.get("metadata") or {}),
+        source=str(args.get("source", "tool:memory.write")),
+        confidence=float(args.get("confidence", 1.0)),
+        expires_at=args.get("expires_at"),
+        visibility=str(args.get("visibility", "private")),
+        risk_level=str(args.get("risk_level", "low")),
     )
